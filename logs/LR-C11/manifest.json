@@ -3,42 +3,19 @@
   "team_id": "contest2026_037_TensorFishSpecialActivityDivison",
   "github_login": "LR-C11",
   "generator": "claude-code-collector@1.2.0",
-  "updated_at": "2026-07-24T04:49:35.946Z",
+  "updated_at": "2026-07-24T07:02:19.594Z",
   "sessions": [
     {
-      "session_id": "b49754f5-30f9-443f-8c42-65d0c7832797",
+      "session_id": "73ed2ede-3e84-44da-a9e1-ad4118aa969a",
       "tool": "claude-code",
-      "started_at": "2026-07-23T13:44:50.642Z",
-      "last_event_at": "2026-07-23T13:45:02.765Z",
-      "event_count": 12,
-      "raw_event_count": 25,
-      "file_path": "logs/LR-C11/2026-07-23\\claude-code__b49754f5-30f9-443f-8c42-65d0c7832797.jsonl",
+      "started_at": "2026-07-23T15:15:15.680Z",
+      "last_event_at": "2026-07-24T07:02:19.561Z",
+      "event_count": 51,
+      "raw_event_count": 478,
+      "file_path": "logs/LR-C11/2026-07-24\\claude-code__73ed2ede-3e84-44da-a9e1-ad4118aa969a.jsonl",
       "collection_mode": "cli",
       "health": "ok",
       "model": "mimo-v2.5"
-    },
-    {
-      "session_id": "f056daeb-6eb1-486e-9e07-67c44a50004d",
-      "tool": "claude-code",
-      "started_at": "2026-07-23T14:39:39.261Z",
-      "last_event_at": "2026-07-23T15:14:44.851Z",
-      "event_count": 196,
-      "raw_event_count": 288,
-      "file_path": "logs/LR-C11/2026-07-23\\claude-code__f056daeb-6eb1-486e-9e07-67c44a50004d.jsonl",
-      "collection_mode": "cli",
-      "health": "ok",
-      "model": "mimo-v2.5"
-    },
-    {
-      "session_id": "3b11a5dc-1cce-46a6-a80f-4326a4c2c55b",
-      "tool": "claude-code",
-      "started_at": "2026-07-24T04:49:35.917Z",
-      "last_event_at": "2026-07-24T04:49:35.917Z",
-      "event_count": 6,
-      "raw_event_count": 10,
-      "file_path": "logs/LR-C11/2026-07-24\\claude-code__3b11a5dc-1cce-46a6-a80f-4326a4c2c55b.jsonl",
-      "collection_mode": "cli",
-      "health": "ok"
     }
   ]
 }

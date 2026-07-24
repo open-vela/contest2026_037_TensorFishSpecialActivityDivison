@@ -3,7 +3,7 @@
   "team_id": "contest2026_037_TensorFishSpecialActivityDivison",
   "github_login": "LR-C11",
   "generator": "claude-code-collector@1.2.0",
-  "updated_at": "2026-07-24T17:06:10.701Z",
+  "updated_at": "2026-07-24T17:17:38.562Z",
   "sessions": [
     {
       "session_id": "b49754f5-30f9-443f-8c42-65d0c7832797",
@@ -33,9 +33,9 @@
       "session_id": "73ed2ede-3e84-44da-a9e1-ad4118aa969a",
       "tool": "claude-code",
       "started_at": "2026-07-23T15:15:15.680Z",
-      "last_event_at": "2026-07-24T17:06:10.624Z",
-      "event_count": 68,
-      "raw_event_count": 887,
+      "last_event_at": "2026-07-24T17:17:38.428Z",
+      "event_count": 97,
+      "raw_event_count": 925,
       "file_path": "logs/LR-C11/2026-07-25\\claude-code__73ed2ede-3e84-44da-a9e1-ad4118aa969a.jsonl",
       "collection_mode": "cli",
       "health": "ok",

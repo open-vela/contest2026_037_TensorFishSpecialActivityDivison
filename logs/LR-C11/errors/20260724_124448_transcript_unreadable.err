@@ -1,0 +1,12 @@
+{
+  "ts": "2026-07-24T04:44:48.871Z",
+  "kind": "transcript_unreadable",
+  "tool": "claude-code",
+  "team_id": "contest2026_037_TensorFishSpecialActivityDivison",
+  "version": "1.2.0",
+  "context": {
+    "tool": "claude-code",
+    "transcript_path": "C:\\Users\\Administrator\\.claude\\projects\\C--Users-Administrator-Desktop-openvelageminis1\\bce4bf5e-af10-4266-85e9-7db73cfe2fe8.jsonl"
+  },
+  "message": "cannot read or parse transcript at C:\\Users\\Administrator\\.claude\\projects\\C--Users-Administrator-Desktop-openvelageminis1\\bce4bf5e-af10-4266-85e9-7db73cfe2fe8.jsonl"
+}

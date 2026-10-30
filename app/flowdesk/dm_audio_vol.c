@@ -17,6 +17,8 @@
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <nuttx/audio/audio.h>
+#include "media_player.h"
+#include "media_defs.h"
 
 #define VOL_PATH "/data/deskmate_vol.txt"
 #define VOL_DEFAULT 80
@@ -147,67 +149,28 @@ int dm_vol_set(int percent)
 /* short 440Hz beep ~0.25s at 16kHz mono */
 int dm_vol_test_beep(void)
 {
-  FILE *f;
-  int fd;
-  int16_t buf[256];
-  int i;
-  int frames;
-  int n;
+  void *mp;
 
   if (s_mute)
     {
       return -1;
     }
 
-  fd = open("/dev/audio/pcm0p", O_WRONLY);
-  if (fd < 0)
+  /* play prebaked tone via media framework (speaker 4ohm 3W) */
+  mp = media_player_open(MEDIA_STREAM_MUSIC);
+  if (!mp)
     {
       return -1;
     }
-
-#ifdef AUDIOIOC_CONFIGURE
-  {
-    struct audio_caps_desc_s cap;
-    memset(&cap, 0, sizeof(cap));
-    cap.caps.ac_len = sizeof(struct audio_caps_s);
-    cap.caps.ac_type = AUDIO_TYPE_OUTPUT;
-    cap.caps.ac_channels = 1;
-    cap.caps.ac_controls.hw[0] = 16000;
-    cap.caps.ac_controls.b[2] = 16;
-    (void)ioctl(fd, AUDIOIOC_CONFIGURE, (unsigned long)&cap);
-  }
-#endif
-
-  /* ~0.25s = 4000 samples */
-  frames = 4000;
-  n = 0;
-  while (n < frames)
+  if (media_player_prepare(mp, "/resource/audio/med.wav", NULL) != 0)
     {
-      int chunk = frames - n;
-      if (chunk > 256)
-        {
-          chunk = 256;
-        }
-      for (i = 0; i < chunk; i++)
-        {
-          /* sine approx */
-          int idx = (n + i) % 36;
-          static const int16_t sine[36] = {
-            0, 568, 1121, 1648, 2138, 2582, 2972, 3302, 3566,
-            3758, 3876, 3917, 3876, 3758, 3566, 3302, 2972, 2582,
-            2138, 1648, 1121, 568, 0, -568, -1121, -1648, -2138,
-            -2582, -2972, -3302, -3566, -3758, -3876, -3917, -3876, -3758
-          };
-          buf[i] = (int16_t)(sine[idx] / 2);
-        }
-      if (write(fd, buf, (size_t)chunk * 2) < 0)
-        {
-          break;
-        }
-      n += chunk;
+      media_player_close(mp, 0);
+      return -1;
     }
-  close(fd);
-  (void)f;
+  (void)media_player_start(mp);
+  usleep(400 * 1000);
+  (void)media_player_stop(mp);
+  (void)media_player_close(mp, 0);
   return 0;
 }
 

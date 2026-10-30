@@ -100,36 +100,62 @@ static void hs_dev_click(lv_event_t *e)
 static void *hs_scan_thread(void *arg)
 {
   (void)arg;
-  /* classic BT inquiry — headsets use BR/EDR A2DP */
-  system("bttool scan > /tmp/hs_scan.txt 2>&1");
-  usleep(3 * 1000 * 1000);
+  /* bttool is line-oriented stdin CLI (see tools/bt_tools.c) */
+  {
+    FILE *cmd = fopen("/tmp/hs_cmd.txt", "w");
+    if (cmd)
+      {
+        fputs("enable\n", cmd);
+        fputs("inquiry start 8\n", cmd);
+        fputs("quit\n", cmd);
+        fclose(cmd);
+      }
+  }
+  system("bttool < /tmp/hs_cmd.txt > /tmp/hs_scan.txt 2>&1");
 
   FILE *fp = fopen("/tmp/hs_scan.txt", "r");
   s_hs_n = 0;
   s_hs_sel = -1;
   if (fp)
     {
-      char line[128];
+      char line[160];
       while (fgets(line, sizeof(line), fp) && s_hs_n < HS_ROWS)
         {
+          /* Inquiring: device [aa:bb:cc:dd:ee:ff], name: XXX, cod: ... */
+          char *dev = strstr(line, "device [");
+          if (!dev)
+            {
+              continue;
+            }
           char addr[18];
           char name[24];
           addr[0] = 0;
           name[0] = 0;
-          if (sscanf(line, " %17[0-9a-fA-F:]", addr) == 1 && strlen(addr) == 17)
+          if (sscanf(dev, "device [%17[0-9a-fA-F:]]", addr) != 1 ||
+              strlen(addr) != 17)
             {
-              char *n = strstr(line, " ");
-              if (n)
-                {
-                  snprintf(name, sizeof(name), "%.23s", n + 1);
-                  name[strcspn(name, "\r\n")] = 0;
-                }
-              if (!name[0])
-                snprintf(name, sizeof(name), "Headset-%02d", s_hs_n);
-              snprintf(s_hs_addrs[s_hs_n], 18, "%s", addr);
-              snprintf(s_hs_names[s_hs_n], 24, "%s", name);
-              s_hs_n++;
+              continue;
             }
+          {
+            char *nm = strstr(line, "name:");
+            if (nm)
+              {
+                nm += 5;
+                while (*nm == ' ')
+                  {
+                    nm++;
+                  }
+                snprintf(name, sizeof(name), "%.20s", nm);
+                name[strcspn(name, ",\r\n")] = 0;
+              }
+          }
+          if (!name[0])
+            {
+              snprintf(name, sizeof(name), "BT-%02d", s_hs_n);
+            }
+          snprintf(s_hs_addrs[s_hs_n], 18, "%s", addr);
+          snprintf(s_hs_names[s_hs_n], 24, "%s", name);
+          s_hs_n++;
         }
       fclose(fp);
     }
@@ -172,7 +198,7 @@ static void hs_scan(lv_event_t *e)
   pthread_t th;
   pthread_attr_t attr;
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 8192);
+  pthread_attr_setstacksize(&attr, 16384);
   if (pthread_create(&th, &attr, hs_scan_thread, NULL) == 0)
     pthread_detach(th);
   pthread_attr_destroy(&attr);
@@ -187,23 +213,31 @@ static void hs_connect(lv_event_t *e)
       return;
     }
 
-  char cmd[160];
   char msg[80];
+  FILE *cmdf;
   snprintf(msg, sizeof(msg), "正在连接 %s…", s_hs_names[s_hs_sel]);
   hs_set_tip(msg, msg);
 
-  /* bond then A2DP source connect (headset must be in pairing mode) */
-  snprintf(cmd, sizeof(cmd), "bttool bond %s 1", s_hs_addrs[s_hs_sel]);
-  system(cmd);
-  sleep(1);
-  /* a2dp source: establish AVDTP to headphones */
-  snprintf(cmd, sizeof(cmd), "bttool a2dp connect %s", s_hs_addrs[s_hs_sel]);
-  if (system(cmd) != 0)
+  /* bttool: createbond then a2dpsrc connect (headset in pairing mode) */
+  cmdf = fopen("/tmp/hs_conn.txt", "w");
+  if (cmdf)
     {
-      /* fallback if CLI group named differently */
-      snprintf(cmd, sizeof(cmd), "bttool a2dp_source connect %s",
-               s_hs_addrs[s_hs_sel]);
-      system(cmd);
+      fputs("enable\n", cmdf);
+      fprintf(cmdf, "createbond %s 1\n", s_hs_addrs[s_hs_sel]);
+      fputs("quit\n", cmdf);
+      fclose(cmdf);
+      system("bttool < /tmp/hs_conn.txt > /tmp/hs_conn.log 2>&1");
+      sleep(2);
+    }
+
+  cmdf = fopen("/tmp/hs_a2dp.txt", "w");
+  if (cmdf)
+    {
+      fputs("enable\n", cmdf);
+      fprintf(cmdf, "a2dpsrc connect %s\n", s_hs_addrs[s_hs_sel]);
+      fputs("quit\n", cmdf);
+      fclose(cmdf);
+      system("bttool < /tmp/hs_a2dp.txt > /tmp/hs_a2dp.log 2>&1");
     }
 
   snprintf(s_hs_connected, sizeof(s_hs_connected), "%s", s_hs_addrs[s_hs_sel]);
@@ -225,11 +259,17 @@ static void hs_disconnect(lv_event_t *e)
   (void)e;
   if (s_hs_connected[0])
     {
-      char cmd[128];
-      snprintf(cmd, sizeof(cmd), "bttool a2dp disconnect %s", s_hs_connected);
-      system(cmd);
+      FILE *cmdf = fopen("/tmp/hs_disc.txt", "w");
+      if (cmdf)
+        {
+          fputs("enable\n", cmdf);
+          fprintf(cmdf, "a2dpsrc disconnect %s\n", s_hs_connected);
+          fputs("quit\n", cmdf);
+          fclose(cmdf);
+          system("bttool < /tmp/hs_disc.txt > /tmp/hs_disc.log 2>&1");
+        }
       s_hs_connected[0] = 0;
-  unlink("/tmp/hs_connected.flag");
+      unlink("/tmp/hs_connected.flag");
     }
   if (s_hs_cur_l)
     {

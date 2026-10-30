@@ -4,6 +4,7 @@
 
 include $(APPDIR)/Make.defs
 CFLAGS += ${INCDIR_PREFIX}$(APPDIR)/frameworks/connectivity/bluetooth/framework/include
+CFLAGS += ${INCDIR_PREFIX}$(APPDIR)/frameworks/multimedia/media/include
 include $(APPDIR)/vendor/allwinnertech/Common.mk
 
 MAINSRC = deskmate_main.c

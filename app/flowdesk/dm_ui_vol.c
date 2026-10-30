@@ -177,8 +177,8 @@ void dm_create_volume(void)
 
   /* main card */
   card = lv_obj_create(s_vol_page);
-  lv_obj_set_size(card, 304, 120);
-  lv_obj_set_pos(card, 8, 42);
+  lv_obj_set_size(card, 304, 96);
+  lv_obj_set_pos(card, 8, 40);
   lv_obj_set_style_bg_color(card, lv_color_hex(MD_SURFACE_CONTAINER),
                             LV_PART_MAIN);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
@@ -199,7 +199,7 @@ void dm_create_volume(void)
 
   s_slider = lv_slider_create(card);
   lv_obj_set_size(s_slider, 260, 12);
-  lv_obj_set_pos(s_slider, 0, 56);
+  lv_obj_set_pos(s_slider, 0, 52);
   lv_slider_set_range(s_slider, 0, 100);
   lv_obj_set_style_bg_color(s_slider, lv_color_hex(MD_SURFACE_HIGHEST),
                             LV_PART_MAIN);
@@ -211,16 +211,16 @@ void dm_create_volume(void)
   lv_obj_add_event_cb(s_slider, slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
   /* +/- */
-  btn = dm_btn(card, "−", "-", 40, 24, MD_SURFACE_HIGH, MD_ON_SURFACE,
+  btn = dm_btn(card, "−", "-", 40, 22, MD_SURFACE_HIGH, MD_ON_SURFACE,
                vol_minus, NULL);
-  lv_obj_set_pos(btn, 0, 82);
-  btn = dm_btn(card, "＋", "+", 40, 24, MD_SURFACE_HIGH, MD_ON_SURFACE,
+  lv_obj_set_pos(btn, 0, 70);
+  btn = dm_btn(card, "＋", "+", 40, 22, MD_SURFACE_HIGH, MD_ON_SURFACE,
                vol_plus, NULL);
-  lv_obj_set_pos(btn, 220, 82);
+  lv_obj_set_pos(btn, 220, 70);
 
   s_vol_sub = dm_lbl(card, "设备音量 800/1000", "HW 800/1000", g_dm_font_s,
                      MD_ON_SURFACE_VARIANT);
-  lv_obj_set_pos(s_vol_sub, 52, 86);
+  lv_obj_set_pos(s_vol_sub, 52, 74);
 
   /* presets */
   {
@@ -230,42 +230,44 @@ void dm_create_volume(void)
       {
         char t[8];
         snprintf(t, sizeof(t), "%d", presets[i]);
-        btn = dm_btn(s_vol_page, t, t, 70, 28, MD_SECONDARY_CONTAINER,
+        btn = dm_btn(s_vol_page, t, t, 70, 24, MD_SECONDARY_CONTAINER,
                      MD_ON_SECONDARY_CONT, vol_preset,
                      (void *)(intptr_t)presets[i]);
-        lv_obj_set_pos(btn, x, 176);
+        lv_obj_set_pos(btn, x, 188);
         x += 76;
       }
   }
 
   /* mute / test */
-  s_mute_btn = dm_btn(s_vol_page, "静音", "Mute", 140, 28, MD_SURFACE_HIGH,
+  s_mute_btn = dm_btn(s_vol_page, "静音", "Mute", 140, 26, MD_SURFACE_HIGH,
                       MD_ON_SURFACE, vol_mute, NULL);
-  lv_obj_set_pos(s_mute_btn, 20, 214);
-  btn = dm_btn(s_vol_page, "试听", "Test", 140, 28, MD_PRIMARY, MD_ON_PRIMARY,
+  lv_obj_set_pos(s_mute_btn, 20, 210);
+  btn = dm_btn(s_vol_page, "试听", "Test", 140, 26, MD_PRIMARY, MD_ON_PRIMARY,
                vol_test, NULL);
-  lv_obj_set_pos(btn, 160, 214);
+  lv_obj_set_pos(btn, 160, 210);
 
   /* audio output channel */
   {
     lv_obj_t *ol = dm_lbl(s_vol_page, "音频输出", "Output", g_dm_font_s,
                           MD_ON_SURFACE_VARIANT);
-    lv_obj_set_pos(ol, 12, 128);
+    lv_obj_set_pos(ol, 12, 142);
     s_out_l = dm_lbl(s_vol_page, "自动", "Auto", g_dm_font_s, MD_PRIMARY);
-    lv_obj_set_pos(s_out_l, 240, 128);
+    lv_obj_set_pos(s_out_l, 240, 142);
     {
-      lv_obj_t *b1 = dm_btn(s_vol_page, "自动", "Auto", 88, 26,
+      lv_obj_t *b1 = dm_btn(s_vol_page, "自动", "Auto", 88, 24,
                             MD_SECONDARY_CONTAINER, MD_ON_SECONDARY_CONT,
                             out_pick, (void *)(intptr_t)DM_OUT_AUTO);
-      lv_obj_set_pos(b1, 12, 148);
-      lv_obj_t *b2 = dm_btn(s_vol_page, "喇叭", "Spk", 88, 26,
+      lv_obj_set_pos(b1, 12, 142);
+      /* keep label visible: shift buttons below label */
+      lv_obj_set_pos(b1, 12, 160);
+      lv_obj_t *b2 = dm_btn(s_vol_page, "喇叭", "Spk", 88, 24,
                             MD_SECONDARY_CONTAINER, MD_ON_SECONDARY_CONT,
                             out_pick, (void *)(intptr_t)DM_OUT_SPEAKER);
-      lv_obj_set_pos(b2, 108, 148);
-      lv_obj_t *b3 = dm_btn(s_vol_page, "耳机", "BT", 88, 26,
+      lv_obj_set_pos(b2, 108, 160);
+      lv_obj_t *b3 = dm_btn(s_vol_page, "耳机", "BT", 88, 24,
                             MD_SECONDARY_CONTAINER, MD_ON_SECONDARY_CONT,
                             out_pick, (void *)(intptr_t)DM_OUT_HEADSET);
-      lv_obj_set_pos(b3, 204, 148);
+      lv_obj_set_pos(b3, 204, 160);
     }
   }
 

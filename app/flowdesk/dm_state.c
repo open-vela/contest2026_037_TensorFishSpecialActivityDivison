@@ -188,6 +188,8 @@ void dm_show(dm_page_t p)
       if (i == (int)p)
         {
           fade_in(g_dm_pages[i]);
+          /* keep active page on top (later-created pages e.g. 2048) */
+          lv_obj_move_foreground(g_dm_pages[i]);
         }
       else
         {
@@ -223,6 +225,8 @@ void dm_show(dm_page_t p)
       else
         {
           lv_obj_clear_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
+          /* dock must stay above content pages */
+          lv_obj_move_foreground(g_dm_dock);
         }
       dm_dock_highlight(p);
     }

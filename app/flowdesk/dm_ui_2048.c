@@ -423,6 +423,7 @@ void dm_create_2048(void)
   lv_obj_set_style_border_width(page, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(page, 0, LV_PART_MAIN);
   lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN); /* hide until dm_show(PAGE_2048) */
   g_dm_pages[PAGE_2048] = page;
 
   back = dm_btn(page, "←", "<", 36, 24, C_BTN, C_MUTED, g2048_back, NULL);

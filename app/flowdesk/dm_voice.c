@@ -163,6 +163,7 @@ static void *rec_thread(void *arg)
       ssize_t n = read(s_rec_fd, buf, sizeof(buf));
       if (n <= 0)
         {
+          /* fd closed by dm_voice_rec_stop() or device error */
           break;
         }
       fwrite(buf, 1, (size_t)n, s_rec_out);
@@ -218,7 +219,6 @@ int dm_voice_rec_stop(void)
 
   if (!s_rec_active)
     {
-      /* maybe already finished by max timeout */
       FILE *f = fopen(WAV_REC, "rb");
       if (f)
         {
@@ -228,10 +228,19 @@ int dm_voice_rec_stop(void)
       return -1;
     }
 
+  /* ask thread to stop, then close device to unblock read() */
   s_rec_stop = 1;
-  for (i = 0; i < 50 && s_rec_active; i++)
+  if (s_rec_fd >= 0)
     {
-      usleep(20 * 1000);
+      int fd = s_rec_fd;
+      s_rec_fd = -1;
+      close(fd);
+    }
+
+  /* short wait only — do not freeze LVGL thread */
+  for (i = 0; i < 15 && s_rec_active; i++)
+    {
+      usleep(10 * 1000);
     }
 
   {

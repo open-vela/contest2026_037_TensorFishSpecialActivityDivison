@@ -9,6 +9,10 @@
 #include "deskmate.h"
 #include "dm_voice.h"
 #include "dm_tts_voice.h"
+#include "media_recorder.h"
+#include "media_player.h"
+#include "media_defs.h"
+#include <uv.h>
 #include "dm_audio_route.h"
 
 #ifdef CONFIG_DESKMATE_APP
@@ -25,7 +29,7 @@
 #include <nuttx/audio/audio.h>
 
 #define VOICE_BASE   "https://token-plan-sgp.xiaomimimo.com/v1"
-#define VOICE_KEY    "tp-s4ivq5cxzz7uke2mh9ms0bqzzci2oartptn4wm3b7608ukon"
+#define VOICE_KEY    "tp-s8f46wpkkkdpqika5xchqalgg7m632kp0n9wdd9omjlnn64c"
 #define ASR_MODEL    "mimo-v2.5-asr"
 #define TTS_MODEL    "mimo-v2.5-tts"
 #define CHAT_MODEL   "mimo-v2.6-flash"
@@ -44,8 +48,6 @@
 static volatile dm_voice_state_t s_st = DM_VOICE_IDLE;
 static volatile int s_rec_active;
 static volatile int s_rec_stop;
-static int s_rec_fd = -1;
-static FILE *s_rec_out;
 static pthread_t s_rec_th;
 static int s_speaker_vol = 80; /* percent */
 
@@ -77,119 +79,154 @@ int dm_voice_rec_active(void)
   return s_rec_active;
 }
 
-static void wav_write_header(FILE *f, uint32_t data_bytes)
-{
-  uint32_t byte_rate = REC_RATE * REC_CH * (REC_BITS / 8);
-  uint16_t block_align = REC_CH * (REC_BITS / 8);
-  uint8_t hdr[44];
+/* ---------- media async (uv loop + proper callbacks) ---------- */
 
-  memset(hdr, 0, sizeof(hdr));
-  memcpy(hdr, "RIFF", 4);
-  {
-    uint32_t riff = 36 + data_bytes;
-    memcpy(hdr + 4, &riff, 4);
-  }
-  memcpy(hdr + 8, "WAVEfmt ", 8);
-  {
-    uint32_t fmt_sz = 16;
-    uint16_t fmt = 1;
-    uint16_t ch = REC_CH;
-    uint32_t rate = REC_RATE;
-    uint16_t bits = REC_BITS;
-    memcpy(hdr + 16, &fmt_sz, 4);
-    memcpy(hdr + 20, &fmt, 2);
-    memcpy(hdr + 22, &ch, 2);
-    memcpy(hdr + 24, &rate, 4);
-    memcpy(hdr + 28, &byte_rate, 4);
-    memcpy(hdr + 32, &block_align, 2);
-    memcpy(hdr + 34, &bits, 2);
-  }
-  memcpy(hdr + 36, "data", 4);
-  memcpy(hdr + 40, &data_bytes, 4);
-  fwrite(hdr, 1, 44, f);
+static uv_loop_t s_uv;
+static uv_thread_t s_uv_th;
+static volatile int s_uv_ready;
+
+static void *s_rec_h;
+static void *s_play_h;
+static volatile int s_rec_active;
+static volatile int s_rec_stop;
+static volatile int s_rec_started;
+static volatile int s_play_done;
+static volatile int s_play_started;
+static uv_timer_t s_rec_timer;
+
+static void uv_loop_thread(void *arg)
+{
+  (void)arg;
+  uv_loop_init(&s_uv);
+  s_uv_ready = 1;
+  uv_run(&s_uv, UV_RUN_DEFAULT);
+  uv_loop_close(&s_uv);
+  s_uv_ready = 0;
+}
+
+static void uv_ensure(void)
+{
+  int i;
+  if (s_uv_ready)
+    {
+      return;
+    }
+  if (uv_thread_create(&s_uv_th, uv_loop_thread, NULL) != 0)
+    {
+      return;
+    }
+  for (i = 0; i < 50 && !s_uv_ready; i++)
+    {
+      usleep(10 * 1000);
+    }
+}
+
+/* ---- recorder (async) ---- */
+
+static void rec_on_start(void *cookie, int ret)
+{
+  (void)cookie;
+  s_rec_started = (ret == 0) ? 1 : -1;
+}
+
+static void rec_on_prepare(void *cookie, int ret)
+{
+  (void)cookie;
+  if (ret != 0)
+    {
+      s_rec_started = -1;
+      s_rec_active = 0;
+      return;
+    }
+  media_uv_recorder_start_auto(s_rec_h, MEDIA_SCENARIO_RECORD,
+                               rec_on_start, NULL);
+}
+
+static void rec_on_open(void *cookie, int ret)
+{
+  char opts[128];
+
+  (void)cookie;
+  if (ret != 0 || !s_rec_h)
+    {
+      s_rec_started = -1;
+      s_rec_active = 0;
+      return;
+    }
+  snprintf(opts, sizeof(opts),
+           "format=wav:sample_rate=%d:ch_layout=mono", REC_RATE);
+  unlink(WAV_REC);
+  media_uv_recorder_prepare(s_rec_h, WAV_REC, opts,
+                            NULL, rec_on_prepare, NULL);
+}
+
+static void rec_on_stop(void *cookie, int ret)
+{
+  (void)cookie;
+  (void)ret;
+  if (s_rec_h)
+    {
+      media_uv_recorder_close(s_rec_h, NULL);
+      s_rec_h = NULL;
+    }
+  s_rec_active = 0;
+  s_st = DM_VOICE_IDLE;
+}
+
+static void rec_poll_cb(uv_timer_t *timer)
+{
+  if (!s_rec_stop && s_rec_started >= 0)
+    {
+      return;
+    }
+  uv_timer_stop(timer);
+  if (s_rec_h && s_rec_started > 0)
+    {
+      media_uv_recorder_stop(s_rec_h, rec_on_stop, NULL);
+    }
+  else
+    {
+      if (s_rec_h)
+        {
+          media_uv_recorder_close(s_rec_h, NULL);
+          s_rec_h = NULL;
+        }
+      s_rec_active = 0;
+      s_st = DM_VOICE_IDLE;
+    }
 }
 
 static void *rec_thread(void *arg)
 {
   int max_sec = (int)(intptr_t)arg;
-  char buf[1024];
-  size_t got = 0;
-  size_t want;
+  int waited;
 
   if (max_sec <= 0)
     {
       max_sec = REC_MAX_SEC;
     }
-  if (max_sec > REC_MAX_SEC)
-    {
-      max_sec = REC_MAX_SEC;
-    }
-  want = (size_t)max_sec * REC_RATE * REC_CH * (REC_BITS / 8);
 
-  s_rec_fd = open("/dev/audio/pcm0c", O_RDONLY);
-  if (s_rec_fd < 0)
-    {
-      s_rec_active = 0;
-      s_st = DM_VOICE_ERR;
-      return NULL;
-    }
+  s_st = DM_VOICE_REC;
+  s_rec_started = 0;
+  s_rec_stop = 0;
+  uv_ensure();
 
-#ifdef AUDIOIOC_CONFIGURE
-  {
-    struct audio_caps_desc_s cap;
-    memset(&cap, 0, sizeof(cap));
-    cap.caps.ac_len = sizeof(cap.caps);
-    cap.caps.ac_type = AUDIO_TYPE_INPUT;
-    cap.caps.ac_channels = REC_CH;
-    cap.caps.ac_controls.hw[0] = (uint16_t)REC_RATE;
-    cap.caps.ac_controls.b[2] = (uint8_t)REC_BITS;
-    (void)ioctl(s_rec_fd, AUDIOIOC_CONFIGURE, &cap);
-  }
-#endif
+  s_rec_h = media_uv_recorder_open(&s_uv, MEDIA_SOURCE_MIC, rec_on_open, NULL);
 
-  s_rec_out = fopen(WAV_REC, "wb");
-  if (!s_rec_out)
-    {
-      close(s_rec_fd);
-      s_rec_fd = -1;
-      s_rec_active = 0;
-      s_st = DM_VOICE_ERR;
-      return NULL;
-    }
-  wav_write_header(s_rec_out, 0);
+  uv_timer_init(&s_uv, &s_rec_timer);
+  uv_timer_start(&s_rec_timer, rec_poll_cb, 100, 100);
 
-  while (!s_rec_stop && got < want)
+  waited = 0;
+  while (!s_rec_stop && waited < max_sec * 10)
     {
-      ssize_t n = read(s_rec_fd, buf, sizeof(buf));
-      if (n <= 0)
+      usleep(100 * 1000);
+      waited++;
+      if (s_rec_started < 0)
         {
-          /* fd closed by dm_voice_rec_stop() or device error */
           break;
         }
-      fwrite(buf, 1, (size_t)n, s_rec_out);
-      got += (size_t)n;
     }
-
-  /* patch sizes */
-  if (s_rec_out)
-    {
-      uint32_t data_bytes = (uint32_t)got;
-      uint32_t riff = 36 + data_bytes;
-      fseek(s_rec_out, 4, SEEK_SET);
-      fwrite(&riff, 4, 1, s_rec_out);
-      fseek(s_rec_out, 40, SEEK_SET);
-      fwrite(&data_bytes, 4, 1, s_rec_out);
-      fclose(s_rec_out);
-      s_rec_out = NULL;
-    }
-  if (s_rec_fd >= 0)
-    {
-      close(s_rec_fd);
-      s_rec_fd = -1;
-    }
-
-  s_rec_active = 0;
-  s_st = DM_VOICE_IDLE;
+  s_rec_stop = 1;
   return NULL;
 }
 
@@ -228,17 +265,8 @@ int dm_voice_rec_stop(void)
       return -1;
     }
 
-  /* ask thread to stop, then close device to unblock read() */
   s_rec_stop = 1;
-  if (s_rec_fd >= 0)
-    {
-      int fd = s_rec_fd;
-      s_rec_fd = -1;
-      close(fd);
-    }
-
-  /* short wait only — do not freeze LVGL thread */
-  for (i = 0; i < 15 && s_rec_active; i++)
+  for (i = 0; i < 50 && s_rec_active; i++)
     {
       usleep(10 * 1000);
     }
@@ -254,28 +282,114 @@ int dm_voice_rec_stop(void)
   }
 }
 
-/* ---- HTTP helpers ---- */
+/* ---- player (async) ---- */
 
-static int http_post_json(const char *path, const char *json_body,
-                          const char *out_path)
+static void play_event_cb(void *cookie, int event, int result, const char *data)
 {
-  char cmd[1400];
-  FILE *f = fopen(JSON_REQ, "w");
+  (void)cookie;
+  (void)result;
+  (void)data;
+  if (event == MEDIA_EVENT_COMPLETED || event == MEDIA_EVENT_STOPPED ||
+      event == MEDIA_EVENT_NOP)
+    {
+      s_play_done = 1;
+    }
+}
 
-  if (!f)
+static void play_on_start(void *cookie, int ret)
+{
+  (void)cookie;
+  s_play_started = (ret == 0) ? 1 : -1;
+  if (s_play_started < 0)
+    {
+      s_play_done = 1;
+    }
+}
+
+static void play_on_prepare(void *cookie, int ret)
+{
+  (void)cookie;
+  if (ret != 0)
+    {
+      s_play_started = -1;
+      s_play_done = 1;
+      return;
+    }
+  media_uv_player_start_auto(s_play_h, MEDIA_SCENARIO_TTS, play_on_start, NULL);
+}
+
+static void play_on_open(void *cookie, int ret)
+{
+  (void)cookie;
+  if (ret != 0 || !s_play_h)
+    {
+      s_play_started = -1;
+      s_play_done = 1;
+      return;
+    }
+  media_uv_player_listen(s_play_h, play_event_cb);
+  media_uv_player_prepare(s_play_h, WAV_TTS, NULL,
+                          NULL, play_on_prepare, NULL);
+}
+
+static int play_wav(const char *path)
+{
+  int ch = dm_out_get();
+  int i;
+
+  if (ch == 2 && !dm_out_headset_present())
     {
       return -1;
     }
-  fwrite(json_body, 1, strlen(json_body), f);
-  fclose(f);
-  unlink(out_path);
-  snprintf(cmd, sizeof(cmd),
-           "curl -sS -m 25 -X POST \"%s%s\" "
-           "-H \"Authorization: Bearer %s\" "
-           "-H \"Content-Type: application/json\" "
-           "-d @%s -o %s",
-           VOICE_BASE, path, VOICE_KEY, JSON_REQ, out_path);
-  return system(cmd) == 0 ? 0 : -1;
+
+  {
+    char cmd[96];
+    snprintf(cmd, sizeof(cmd), "amixer set PCM %d%% 2>/dev/null",
+             s_speaker_vol);
+    (void)system(cmd);
+  }
+
+  if (path && strcmp(path, WAV_TTS) != 0)
+    {
+      char cmd[96];
+      snprintf(cmd, sizeof(cmd), "cp %s %s 2>/dev/null", path, WAV_TTS);
+      (void)system(cmd);
+    }
+
+  uv_ensure();
+  s_play_done = 0;
+  s_play_started = 0;
+  s_play_h = media_uv_player_open(&s_uv, MEDIA_STREAM_MUSIC,
+                                  play_on_open, NULL);
+
+  for (i = 0; i < 150 && !s_play_done; i++)
+    {
+      usleep(100 * 1000);
+    }
+
+  if (s_play_h)
+    {
+      media_uv_player_stop(s_play_h, NULL, NULL);
+      media_uv_player_close(s_play_h, 0, NULL);
+      s_play_h = NULL;
+    }
+  return 0;
+}
+
+
+/* ---- HTTP / ASR / LLM / TTS (sync, run in worker thread) ---- */
+
+void dm_voice_set_speaker_volume(int percent)
+{
+  if (percent < 0)
+    {
+      percent = 0;
+    }
+  if (percent > 100)
+    {
+      percent = 100;
+    }
+  s_speaker_vol = percent;
 }
 
 static void json_escape(const char *in, char *out, size_t cap)
@@ -311,6 +425,46 @@ static void json_escape(const char *in, char *out, size_t cap)
   out[o] = '\0';
 }
 
+/* nsh system() strips quotes — run curl from a script file */
+static int run_curl_script(const char *line)
+{
+  FILE *f = fopen("/tmp/dm_curl.sh", "w");
+  int rc;
+  if (!f)
+    {
+      return -1;
+    }
+  fputs("#!/bin/sh\n", f);
+  fputs(line, f);
+  fputs("\n", f);
+  fclose(f);
+  rc = system("sh /tmp/dm_curl.sh");
+  return rc == 0 ? 0 : -1;
+}
+
+static int http_post_json(const char *path, const char *json_body,
+                          const char *out_path)
+{
+  char cmd[1400];
+  FILE *f = fopen(JSON_REQ, "w");
+
+  if (!f)
+    {
+      return -1;
+    }
+  fwrite(json_body, 1, strlen(json_body), f);
+  fclose(f);
+  unlink(out_path);
+  snprintf(cmd, sizeof(cmd),
+           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt "
+           "-m 25 -X POST %s%s "
+           "-H 'Authorization: Bearer %s' "
+           "-H 'Content-Type: application/json' "
+           "-d @%s -o %s",
+           VOICE_BASE, path, VOICE_KEY, JSON_REQ, out_path);
+  return run_curl_script(cmd);
+}
+
 static int asr_wav(const char *wav, char *text, int cap)
 {
   char cmd[1200];
@@ -323,11 +477,12 @@ static int asr_wav(const char *wav, char *text, int cap)
   text[0] = '\0';
   unlink(TXT_ASR);
   snprintf(cmd, sizeof(cmd),
-           "curl -sS -m 25 -X POST \"%s/audio/transcriptions\" "
-           "-H \"Authorization: Bearer %s\" "
-           "-F \"file=@%s\" -F \"model=%s\" -o %s",
+           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt "
+           "-m 25 -X POST %s/audio/transcriptions "
+           "-H 'Authorization: Bearer %s' "
+           "-F file=@%s -F model=%s -o %s",
            VOICE_BASE, VOICE_KEY, wav, ASR_MODEL, TXT_ASR);
-  if (system(cmd) != 0)
+  if (run_curl_script(cmd) != 0)
     {
       return -1;
     }
@@ -494,86 +649,13 @@ static int tts_synth(const char *text, const char *wav_path)
 
   unlink(wav_path);
   snprintf(cmd, sizeof(cmd),
-           "curl -sS -m 25 -X POST \"%s/audio/speech\" "
-           "-H \"Authorization: Bearer %s\" "
-           "-H \"Content-Type: application/json\" "
+           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt "
+           "-m 25 -X POST %s/audio/speech "
+           "-H 'Authorization: Bearer %s' "
+           "-H 'Content-Type: application/json' "
            "-d @%s -o %s",
            VOICE_BASE, VOICE_KEY, JSON_REQ, wav_path);
-  return system(cmd) == 0 ? 0 : -1;
-}
-
-void dm_voice_set_speaker_volume(int percent)
-{
-  if (percent < 0)
-    {
-      percent = 0;
-    }
-  if (percent > 100)
-    {
-      percent = 100;
-    }
-  s_speaker_vol = percent;
-}
-
-static int play_wav(const char *path)
-{
-  char cmd[192];
-  int fd;
-  int ch = dm_out_get();
-
-  if (ch == 2 || (ch == 0 && dm_out_headset_present()))
-    {
-      snprintf(cmd, sizeof(cmd),
-               "bttool a2dp play %s 2>/dev/null", path);
-      if (system(cmd) == 0)
-        {
-          return 0;
-        }
-      if (ch == 2)
-        {
-          return -1;
-        }
-    }
-
-  snprintf(cmd, sizeof(cmd),
-           "amixer set PCM %d%% 2>/dev/null",
-           s_speaker_vol);
-  (void)system(cmd);
-
-  snprintf(cmd, sizeof(cmd),
-           "nxplayer -p %s 2>/dev/null || play %s 2>/dev/null",
-           path, path);
-  if (system(cmd) == 0)
-    {
-      return 0;
-    }
-
-  {
-    FILE *f = fopen(path, "rb");
-    char buf[1024];
-    size_t n;
-    if (!f)
-      {
-        return -1;
-      }
-    fd = open("/dev/audio/pcm0p", O_WRONLY);
-    if (fd < 0)
-      {
-        fclose(f);
-        return -1;
-      }
-    fseek(f, 44, SEEK_SET);
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
-      {
-        if (write(fd, buf, n) < 0)
-          {
-            break;
-          }
-      }
-    close(fd);
-    fclose(f);
-    return 0;
-  }
+  return run_curl_script(cmd);
 }
 
 int dm_voice_asr_chat_tts(const char *wav_path, char *reply, int cap)

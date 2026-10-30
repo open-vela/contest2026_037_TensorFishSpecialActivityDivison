@@ -13,11 +13,27 @@
 
 /* MiMo OpenAI-compatible endpoint (user-provided key for this device). */
 #define MIMO_BASE "https://token-plan-sgp.xiaomimimo.com/v1"
-#define MIMO_KEY  "tp-s4ivq5cxzz7uke2mh9ms0bqzzci2oartptn4wm3b7608ukon"
+#define MIMO_KEY  "tp-s8f46wpkkkdpqika5xchqalgg7m632kp0n9wdd9omjlnn64c"
 #define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"
 #define CHAT_RSP_PATH "/tmp/dm_chat_rsp.json"
 #define CHAT_MAX_REPLY 240
+
+static int run_curl_script(const char *line)
+{
+  FILE *f = fopen("/tmp/dm_curl.sh", "w");
+  int rc;
+  if (!f)
+    {
+      return -1;
+    }
+  fputs("#!/bin/sh\n", f);
+  fputs(line, f);
+  fputs("\n", f);
+  fclose(f);
+  rc = system("sh /tmp/dm_curl.sh");
+  return rc == 0 ? 0 : -1;
+}
 
 static char s_last_reply[CHAT_MAX_REPLY];
 static char s_persona_ctx[512];
@@ -283,12 +299,12 @@ const char *dm_chat_ai_ask(const char *user_text)
 
   unlink(CHAT_RSP_PATH);
   snprintf(cmd, sizeof(cmd),
-           "curl -sS -m 20 -X POST \"%s/chat/completions\" "
-           "-H \"Authorization: Bearer %s\" "
-           "-H \"Content-Type: application/json\" "
+           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt -m 20 -X POST %s/chat/completions "
+           "-H 'Authorization: Bearer %s' "
+           "-H 'Content-Type: application/json' "
            "-d @%s -o %s",
            MIMO_BASE, MIMO_KEY, CHAT_REQ_PATH, CHAT_RSP_PATH);
-  if (system(cmd) != 0)
+  if (run_curl_script(cmd) != 0)
     {
       strncpy(s_last_reply, local_reply(user_text),
               sizeof(s_last_reply) - 1);
@@ -353,12 +369,12 @@ int dm_dict_ai_define(const char *word, char *out, int cap)
   fclose(f);
   unlink(CHAT_RSP_PATH);
   snprintf(cmd, sizeof(cmd),
-           "curl -sS -m 18 -X POST \"%s/chat/completions\" "
-           "-H \"Authorization: Bearer %s\" "
-           "-H \"Content-Type: application/json\" "
+           "curl -sS --cacert /resource/etc/ssl/curl/ca-certificates.crt -m 18 -X POST %s/chat/completions "
+           "-H 'Authorization: Bearer %s' "
+           "-H 'Content-Type: application/json' "
            "-d @%s -o %s",
            MIMO_BASE, MIMO_KEY, CHAT_REQ_PATH, CHAT_RSP_PATH);
-  if (system(cmd) != 0)
+  if (run_curl_script(cmd) != 0)
     {
       return -1;
     }

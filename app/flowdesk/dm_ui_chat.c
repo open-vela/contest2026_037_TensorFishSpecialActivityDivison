@@ -1,7 +1,7 @@
 /*
  * dm_ui_chat.c — tap-to-talk voice chat
- *   tap 1: start mic (button red, live seconds)
- *   tap 2: stop + send (ASR → LLM → TTS)
+ * Rule: only the LVGL thread may touch widgets.
+ * Worker writes results into s_out_* ; dm_chat_tick() applies them.
  */
 
 #include "deskmate.h"
@@ -21,13 +21,16 @@ static lv_obj_t *s_ans;
 static lv_obj_t *s_sub;
 static lv_obj_t *s_ptt_btn;
 static volatile bool s_busy;
-static volatile bool s_ui_rec;      /* UI thinks we are recording */
-static volatile int s_job;          /* 1=voice 2=text */
+static volatile bool s_ui_rec;
+static volatile int s_job;
 static volatile int s_rec_sec;
 static volatile int s_mic_err;
+static volatile int s_out_ready; /* 1=text 2=microphone error */
+
 static char s_pending[CHAT_LINE_MAX];
 static char s_last_ans[CHAT_LINE_MAX];
-static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
+static char s_out_ans[CHAT_LINE_MAX];
+static char s_out_sub[80];
 
 static void set_ans(const char *text)
 {
@@ -69,53 +72,60 @@ static void set_ptt(const char *zh, const char *en, uint32_t bg)
   }
 }
 
-static void reset_to_idle(const char *zh, const char *en)
+static void reset_to_idle(void)
 {
   s_ui_rec = false;
   s_rec_sec = 0;
   s_busy = false;
   s_job = 0;
-  set_ptt(zh ? zh : "开始说话", en ? en : "Start talk", C_BTN);
+  set_ptt("开始说话", "Start talk", C_BTN);
 }
 
+/* worker thread — NO LVGL calls here */
 static void *voice_worker(void *arg)
 {
   char reply[CHAT_LINE_MAX];
 
   (void)arg;
-  pthread_mutex_lock(&s_lock);
+
   if (s_job == 1)
     {
-      set_sub(dm_t("ASR → 模型 → 喇叭播报", "ASR → LLM → speaker"));
+      snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+               dm_t("ASR → 模型 → 喇叭播报", "ASR → LLM → speaker"));
       if (dm_voice_asr_chat_tts("/tmp/dm_voice_in.wav", reply,
                                 sizeof(reply)) == 0)
         {
-          set_ans(reply);
-          set_sub(dm_t("已通过喇叭播放回复", "Reply played on speaker"));
-          dm_face_set(FACE_HAPPY, EYE_DECOR_NONE, 8);
+          snprintf(s_out_ans, sizeof(s_out_ans), "%s", reply);
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("已通过喇叭播放回复", "Reply played on speaker"));
+          s_out_ready = 1;
         }
       else
         {
-          set_ans(dm_t("没听清或网络忙，再说一次？",
-                       "Didn't catch that, try again"));
-          set_sub(dm_t("检查麦克风 / 网络", "Check mic / network"));
-          dm_face_set(FACE_SHY, EYE_DECOR_NONE, 6);
+          snprintf(s_out_ans, sizeof(s_out_ans), "%s",
+                   dm_t("没听清或网络忙，再说一次？",
+                        "Didn't catch that, try again"));
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("检查麦克风 / 网络", "Check mic / network"));
+          s_out_ready = 1;
         }
     }
   else if (s_job == 2)
     {
       const char *r = dm_chat_ai_ask(s_pending);
-      set_ans(r ? r : "……");
-      dm_face_set(FACE_HAPPY, EYE_DECOR_NONE, 8);
+      snprintf(s_out_ans, sizeof(s_out_ans), "%s", r ? r : "……");
       if (r && r[0])
         {
-          set_sub(dm_t("正在播放…", "Playing…"));
           (void)dm_voice_tts_play(r);
-          set_sub(dm_t("已通过喇叭播放回复", "Reply played on speaker"));
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("已通过喇叭播放回复", "Reply played on speaker"));
         }
+      else
+        {
+          s_out_sub[0] = '\0';
+        }
+      s_out_ready = 1;
     }
-  reset_to_idle(NULL, NULL);
-  pthread_mutex_unlock(&s_lock);
   return NULL;
 }
 
@@ -132,6 +142,10 @@ static void kick_job(int job)
   s_job = job;
   s_ui_rec = false;
   s_rec_sec = 0;
+  s_out_ready = 0;
+  s_out_ans[0] = '\0';
+  s_out_sub[0] = '\0';
+
   dm_face_set(FACE_THINK, EYE_DECOR_NONE, 10);
   set_ans(job == 1 ? dm_t("识别中…", "Recognizing…")
                    : dm_t("思考中…", "Thinking…"));
@@ -145,7 +159,8 @@ static void kick_job(int job)
     }
   else
     {
-      reset_to_idle(NULL, NULL);
+      s_busy = false;
+      set_ptt("开始说话", "Start talk", C_BTN);
     }
   pthread_attr_destroy(&attr);
 }
@@ -163,7 +178,6 @@ static void face_click(lv_event_t *e)
   kick_job(2);
 }
 
-/* tap 1 = start, tap 2 = stop & send */
 static void ptt_click(lv_event_t *e)
 {
   (void)e;
@@ -175,7 +189,6 @@ static void ptt_click(lv_event_t *e)
 
   if (!s_ui_rec)
     {
-      /* ---- start ---- */
       s_mic_err = 0;
       dm_voice_set_speaker_volume(80);
       if (dm_voice_rec_start(12) != 0)
@@ -190,25 +203,23 @@ static void ptt_click(lv_event_t *e)
       dm_face_set(FACE_THINK, EYE_DECOR_NONE, 10);
       set_ans(dm_t("● 录音中… 再点一下结束并发送",
                    "● Recording… tap again to send"));
-      set_sub(dm_t("点「结束并发送」取消静音并上传",
-                   "Tap Stop & send to finish"));
+      set_sub(dm_t("再点一下结束", "Tap again to stop"));
       set_ptt("结束并发送", "Stop & send", C_HEART);
     }
   else
     {
-      /* ---- stop & send (always, even if mic thread already died) ---- */
       s_ui_rec = false;
       s_rec_sec = 0;
       set_ptt("发送中…", "Sending…", C_BTN_HI);
       set_ans(dm_t("正在结束录音…", "Stopping mic…"));
 
-      (void)dm_voice_rec_stop(); /* unblock /dev read */
+      (void)dm_voice_rec_stop();
 
       if (s_mic_err)
         {
           set_ans(dm_t("麦克风故障，无法录音", "Mic failed"));
           set_sub(dm_t("检查 /dev/audio/pcm0c", "Check mic device"));
-          reset_to_idle(NULL, NULL);
+          reset_to_idle();
           return;
         }
 
@@ -275,7 +286,22 @@ void dm_create_chat(void)
 
 void dm_chat_tick(void)
 {
-  /* live recording feedback */
+  /* apply worker results on LVGL thread */
+  if (s_out_ready)
+    {
+      s_out_ready = 0;
+      if (s_out_ans[0])
+        {
+          set_ans(s_out_ans);
+        }
+      if (s_out_sub[0])
+        {
+          set_sub(s_out_sub);
+        }
+      dm_face_set(FACE_HAPPY, EYE_DECOR_NONE, 8);
+      reset_to_idle();
+    }
+
   if (s_ui_rec && !s_busy)
     {
       char buf[80];
@@ -287,25 +313,19 @@ void dm_chat_tick(void)
                         "● Recording %ds · tap again to send"),
                    s_rec_sec);
           set_ans(buf);
-          if (s_sub)
-            {
-              lv_label_set_text(s_sub,
-                                (s_rec_sec & 1)
-                                  ? dm_t("正在听…", "Listening…")
+          set_sub((s_rec_sec & 1) ? dm_t("正在听…", "Listening…")
                                   : dm_t("对准麦克风说话", "Speak to the mic"));
-            }
         }
       else
         {
-          /* thread died (mic open fail or auto-finished) */
           if (s_rec_sec < 2)
             {
               s_mic_err = 1;
               set_ans(dm_t("麦克风故障，无法录音", "Mic failed"));
-              set_sub(dm_t("检查 /dev/audio/pcm0c", "Check /dev/audio/pcm0c"));
+              set_sub(dm_t("检查 /dev/audio/pcm0c", "Check mic device"));
             }
           s_ui_rec = false;
-          reset_to_idle(NULL, NULL);
+          reset_to_idle();
         }
     }
 }

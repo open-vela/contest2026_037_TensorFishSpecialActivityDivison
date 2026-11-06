@@ -1,17 +1,27 @@
 # FlowDesk 应用场景说明（AI 硬件产品创新赛道）
+# Usage scenarios of Flowdesk AI
 
 ## 一、用户故事
+## 1. Target audience
 
 **谁在用**：把 Gemini-S1（R528）放在书桌上的学生 / 远程办公者。
+**Targeted audience**: Students/ Work from home employees
 
 **场景**：
 - 白天需要专注工作，又想有人轻声提醒喝水、吃药
 - 想查英文单词、和桌搭聊两句，不想掏手机
 - 希望设备**主动开口**提醒，而不是只会被动问答
 
+- **Scenarios**：
+- Automatic meds/ hydration reminder
+- Faster easier and faster translations
+- Remind you **actively**, not passively
+
+
 **解决什么**：桌面小屏 + 4Ω3W 喇叭，用语音和触屏完成专注、查词、健康提醒、联网共享。
 
-## 二、功能清单
+**Solved**: Using a small monitor and a 4Ω3W speaker, it can activate focus mode, translation mode, reminders using voice and touch controls.
+# 二、功能清单
 
 | 模块 | 功能 | 主动/被动 |
 |------|------|-----------|

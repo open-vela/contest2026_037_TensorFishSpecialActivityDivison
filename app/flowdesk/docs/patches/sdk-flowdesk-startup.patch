@@ -1,0 +1,43 @@
+diff --git a/boards/r528/r528s3-gemini-s1/configs/nsh/defconfig b/boards/r528/r528s3-gemini-s1/configs/nsh/defconfig
+index f54af752..30380fba 100644
+--- a/boards/r528/r528s3-gemini-s1/configs/nsh/defconfig
++++ b/boards/r528/r528s3-gemini-s1/configs/nsh/defconfig
+@@ -228,6 +228,10 @@ CONFIG_DEV_GPIO=y
+ CONFIG_DEV_NULL=y
+ CONFIG_DEV_URANDOM=y
+ CONFIG_DEV_ZERO=y
++CONFIG_DESKMATE_APP=y
++CONFIG_DESKMATE_APP_PRIORITY=100
++CONFIG_DESKMATE_APP_PROGNAME="flowdesk"
++CONFIG_DESKMATE_APP_STACKSIZE=65536
+ CONFIG_DHCPC_RENEW_STACKSIZE=2048000
+ CONFIG_DISABLE_MQUEUE_SYSV=y
+ CONFIG_DISP2_SUNXI=y
+diff --git a/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/defconfig b/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/defconfig
+index 76493346..f9391134 100644
+--- a/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/defconfig
++++ b/boards/r528/r528s3-gemini-s1/configs/nsh_minidisplay/defconfig
+@@ -221,6 +221,7 @@ CONFIG_DEBUG_FULLOPT=y
+ CONFIG_DEBUG_SYMBOLS=y
+ CONFIG_DEBUG_UORB=y
+ CONFIG_DEFAULT_SMALL=y
++CONFIG_DESKMATE_APP=y
+ CONFIG_DETECT_CARD=y
+ CONFIG_DEV_GPIO=y
+ CONFIG_DEV_NULL=y
+diff --git a/boards/r528/r528s3-gemini-s1/src/etc/init.d/rcS.nsh b/boards/r528/r528s3-gemini-s1/src/etc/init.d/rcS.nsh
+index a9d386b7..6efbed45 100644
+--- a/boards/r528/r528s3-gemini-s1/src/etc/init.d/rcS.nsh
++++ b/boards/r528/r528s3-gemini-s1/src/etc/init.d/rcS.nsh
+@@ -87,7 +87,10 @@ then
+   sh /etc/wifi/start_wifi.sh &
+ fi
+ 
+-#ifdef CONFIG_LUNCHER_MINI_APP
++/* Start one UI only, after storage and system services are ready. */
++#ifdef CONFIG_DESKMATE_APP
++flowdesk &
++#elif defined(CONFIG_LUNCHER_MINI_APP)
+ luncher_mini &
+ #endif
+ 

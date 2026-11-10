@@ -1,0 +1,91 @@
+diff --git a/src/drivers/nuttx/lv_nuttx_lcd.c b/src/drivers/nuttx/lv_nuttx_lcd.c
+index a53f4b8f2..f3863ae9b 100644
+--- a/src/drivers/nuttx/lv_nuttx_lcd.c
++++ b/src/drivers/nuttx/lv_nuttx_lcd.c
+@@ -150,8 +150,8 @@ static void flush_cb(lv_display_t * disp, const lv_area_t * area_p,
+ 
+ static lv_display_t * lcd_init(int fd, int hor_res, int ver_res)
+ {
+-    lv_color_t * draw_buf = NULL;
+-    lv_color_t * draw_buf_2 = NULL;
++    lv_draw_buf_t * draw_buf = NULL;
++    lv_draw_buf_t * draw_buf_2 = NULL;
+     lv_nuttx_lcd_t * lcd = lv_malloc_zeroed(sizeof(lv_nuttx_lcd_t));
+     LV_ASSERT_MALLOC(lcd);
+     if(lcd == NULL) {
+@@ -165,39 +165,47 @@ static lv_display_t * lcd_init(int fd, int hor_res, int ver_res)
+         return NULL;
+     }
+ 
+-    uint32_t px_size = lv_color_format_get_size(lv_display_get_color_format(disp));
++    lv_color_format_t cf = lv_display_get_color_format(disp);
+ #if LV_NUTTX_LCD_BUFFER_COUNT > 0
+-    uint32_t buf_size = hor_res * ver_res * px_size;
++    uint32_t buf_height = ver_res;
+     lv_display_render_mode_t render_mode = LV_DISPLAY_RENDER_MODE_FULL;
+ #else
+-    uint32_t buf_size = hor_res * LV_NUTTX_LCD_BUFFER_SIZE * px_size;
++    uint32_t buf_height = LV_NUTTX_LCD_BUFFER_SIZE;
+     lv_display_render_mode_t render_mode = LV_DISPLAY_RENDER_MODE_PARTIAL;
+ #endif
+ 
+-    draw_buf = lv_malloc(buf_size);
++    /* Use LVGL allocation handlers for alignment, padded stride and ownership. */
++    draw_buf = lv_draw_buf_create(hor_res, buf_height, cf, LV_STRIDE_AUTO);
+     if(draw_buf == NULL) {
+         LV_LOG_ERROR("display draw_buf malloc failed");
++        lv_display_delete(disp);
+         lv_free(lcd);
+         return NULL;
+     }
+ 
+ #if LV_NUTTX_LCD_BUFFER_COUNT == 2
+-    draw_buf_2 = lv_malloc(buf_size);
++    draw_buf_2 = lv_draw_buf_create(hor_res, buf_height, cf, LV_STRIDE_AUTO);
+     if(draw_buf_2 == NULL) {
+         LV_LOG_ERROR("display draw_buf_2 malloc failed");
++        lv_draw_buf_destroy(draw_buf);
++        lv_display_delete(disp);
+         lv_free(lcd);
+-        lv_free(draw_buf);
+         return NULL;
+     }
+ #endif
+ 
+     lcd->fd = fd;
++    lcd->align_info.row_start_align = 1;
++    lcd->align_info.col_start_align = 1;
++    lcd->align_info.width_align = 1;
++    lcd->align_info.height_align = 1;
+     if(ioctl(fd, LCDDEVIO_GETAREAALIGN, &lcd->align_info) < 0) {
+         perror("Error: ioctl(LCDDEVIO_GETAREAALIGN) failed");
+     }
+ 
+     lcd->disp = disp;
+-    lv_display_set_buffers(lcd->disp, draw_buf, draw_buf_2, buf_size, render_mode);
++    lv_display_set_draw_buffers(lcd->disp, draw_buf, draw_buf_2);
++    lv_display_set_render_mode(lcd->disp, render_mode);
+     lv_display_set_flush_cb(lcd->disp, flush_cb);
+     lv_display_add_event_cb(lcd->disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, lcd);
+     lv_display_add_event_cb(lcd->disp, display_release_cb, LV_EVENT_DELETE, lcd->disp);
+@@ -216,15 +224,17 @@ static void display_release_cb(lv_event_t * e)
+ 
+         /* clear display buffer */
+         if(disp->buf_1) {
+-            lv_free(disp->buf_1);
++            lv_draw_buf_destroy(disp->buf_1);
+             disp->buf_1 = NULL;
+         }
+         if(disp->buf_2) {
+-            lv_free(disp->buf_2);
++            lv_draw_buf_destroy(disp->buf_2);
+             disp->buf_2 = NULL;
+         }
+ 
+-        /* close device fb */
++        disp->buf_act = NULL;
++
++        /* close device lcd */
+         if(dsc->fd >= 0) {
+             close(dsc->fd);
+             dsc->fd = -1;

@@ -1,0 +1,44 @@
+diff --git a/netutils/ntpclient/ntpclient.c b/netutils/ntpclient/ntpclient.c
+index 115f7c5d4..dfbcb59be 100644
+--- a/netutils/ntpclient/ntpclient.c
++++ b/netutils/ntpclient/ntpclient.c
+@@ -1305,23 +1305,24 @@ static int ntpc_daemon(int argc, FAR char **argv)
+       clock_gettime(CLOCK_MONOTONIC, &start_monotonic);
+ 
+       nsamples = 0;
+-      if (netlib_check_ipconnectivity(NULL, 1, 1) > 0)
+-        {
+-          /* Collect samples. */
+ 
+-          for (i = 0; i < CONFIG_NETUTILS_NTPCLIENT_NUM_SAMPLES; i++)
+-            {
+-              /* Get next sample. */
++      /* Try NTP directly. ICMP reachability of a compile-time DNS server
++       * does not prove UDP/123 connectivity, and DHCP-only DNS builds have
++       * no CONFIG_NETDB_DNSSERVER_IPv4ADDR at all. The NTP transaction has
++       * its own DNS, socket timeout and response validation.
++       */
+ 
+-              ret = ntpc_get_ntp_sample(srvs, samples, nsamples);
+-              if (ret < 0)
+-                {
+-                  errval = errno;
+-                }
+-              else
+-                {
+-                  ++nsamples;
+-                }
++      for (i = 0; i < CONFIG_NETUTILS_NTPCLIENT_NUM_SAMPLES &&
++                  g_ntpc_daemon.state != NTP_STOP_REQUESTED; i++)
++        {
++          ret = ntpc_get_ntp_sample(srvs, samples, nsamples);
++          if (ret < 0)
++            {
++              errval = errno;
++            }
++          else
++            {
++              ++nsamples;
+             }
+         }
+ 

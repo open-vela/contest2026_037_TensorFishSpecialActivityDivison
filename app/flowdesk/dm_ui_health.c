@@ -5,6 +5,9 @@
  ****************************************************************************/
 
 #include "deskmate.h"
+#include "dm_ai_permissions.h"
+#include "dm_ai_log.h"
+#include "dm_ai_data.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -97,6 +100,7 @@ typedef struct
 } dm_mood_file_t;
 
 static int32_t s_game_ms;
+static int32_t s_game_saved_ms;
 
 static int health_today_key(void)
 {
@@ -114,6 +118,7 @@ static int store_save(void)
   size_t written = 0;
   int fd;
 
+  if (!dm_wifi_clock_valid()) return -1;
   memset(&f, 0, sizeof(f));
   f.magic = DM_MOOD_MAGIC;
   f.count = (uint32_t)s_rec_n;
@@ -146,12 +151,14 @@ static int store_save(void)
       unlink(DM_MOOD_TMP_PATH);
       return -1;
     }
+  s_game_saved_ms = s_game_ms;
   return 0;
 }
 
 static void health_rollover_if_new_day(void)
 {
   int key = health_today_key();
+  if (!dm_wifi_clock_valid()) return;
   if (s_health_day_key < 0)
     {
       s_health_day_key = key;
@@ -163,6 +170,7 @@ static void health_rollover_if_new_day(void)
     }
   /* new calendar day: clear today-scoped stats */
   s_rec_n = 0;
+  s_game_saved_ms = 0;
   g_dm.focus_done_min = 0;
   s_game_ms = 0;
   s_health_day_key = key;
@@ -194,7 +202,7 @@ static void store_load(void)
       return;
     }
 
-  if (f.yday != key)
+  if (dm_wifi_clock_valid() && f.yday != key)
     {
       /* data from previous day — do not leak into today's score */
       s_rec_n = 0;
@@ -215,7 +223,8 @@ static void store_load(void)
     }
   g_dm.focus_done_min = f.focus_done_min;
   s_game_ms = f.game_ms;
-  s_health_day_key = key;
+  s_game_saved_ms = s_game_ms;
+  s_health_day_key = f.yday;
 }
 
 /* ---------- score ---------- */
@@ -841,6 +850,85 @@ static int health_voice_is_down(const char *text)
   return 0;
 }
 
+int dm_health_ai_read(dm_ai_health_query_t query, char *out, size_t cap)
+{
+  int cups, rc;
+  struct tm now;
+  time_t current;
+  char mood[72] = "";
+  char water_prefix[48] = "";
+  int combined = query == DM_AI_HEALTH_WATER_AND_MOOD;
+  size_t i;
+  if (!dm_ai_permission_allowed(DM_AI_READ_HEALTH)) return DM_AI_DATA_DENIED;
+  if (!out || cap < 80) return DM_AI_DATA_INVALID;
+  if (!dm_wifi_clock_valid()) return DM_AI_DATA_CLOCK;
+  if (query == DM_AI_HEALTH_WATER || combined)
+    {
+      rc = dm_water_ai_cups(&cups);
+      if (rc) return rc;
+      if (!combined)
+        {
+          snprintf(out, cap, "设备今日已记录喝水%d杯；仅统计在设备上保存的打卡。", cups);
+          return 0;
+        }
+      snprintf(water_prefix, sizeof(water_prefix), "今日已记录喝水%d杯；", cups);
+    }
+  if (query != DM_AI_HEALTH_LAST_MOOD && !combined) return DM_AI_DATA_INVALID;
+  if (s_health_day_key != health_today_key() || s_rec_n == 0)
+    {
+      snprintf(out, cap, "%s设备没有保存今天的心情记录，无法给出最近一次的时间。", water_prefix);
+      return 0;
+    }
+  if (s_rec_n < 0 || s_rec_n > DM_MOOD_REC_MAX ||
+      s_recs[0].hour > 23 || s_recs[0].min > 59 ||
+      s_recs[0].quick > DM_QUICK_MAX) return DM_AI_DATA_INVALID;
+  if (s_recs[0].quick)
+    snprintf(mood, sizeof(mood), "%s", s_quick_zh[s_recs[0].quick - 1]);
+  else for (i = 0; i < sizeof(s_moods) / sizeof(s_moods[0]); i++)
+    if (s_recs[0].mood_mask & s_moods[i].bit)
+      {
+        size_t used = strlen(mood), len = strlen(s_moods[i].zh);
+        if (used + len + 4 >= sizeof(mood)) break;
+        snprintf(mood + used, sizeof(mood) - used, "%s%s", used ? "、" : "", s_moods[i].zh);
+      }
+  current = time(NULL);
+  if (!localtime_r(&current, &now)) return DM_AI_DATA_CLOCK;
+  snprintf(out, cap, "%s设备保存的最近一条心情：%04d-%02d-%02d %02u:%02u，%s。",
+           water_prefix, now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
+           (unsigned)s_recs[0].hour, (unsigned)s_recs[0].min,
+           mood[0] ? mood : "未选择具体情绪");
+  return 0;
+}
+
+int dm_health_ai_delete(const dm_ai_delete_request_t *request)
+{
+  dm_mood_rec_t previous[DM_MOOD_REC_MAX];
+  int i, found = -1, old_n;
+  if (!request || request->kind != DM_AI_DATA_MOOD) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_MOOD)) return DM_AI_DATA_DENIED;
+  if (!dm_wifi_clock_valid()) return DM_AI_DATA_CLOCK;
+  if (request->selector != DM_AI_SELECT_INDEX &&
+      request->selector != DM_AI_SELECT_LATEST) return DM_AI_DATA_UNSUPPORTED;
+  if (s_health_day_key != health_today_key()) return DM_AI_DATA_NOT_FOUND;
+  for (i = 0; i < s_rec_n; i++)
+    if (dm_ai_data_match(request, NULL, i + 1)) found = i;
+  if (found < 0) return DM_AI_DATA_NOT_FOUND;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_MOOD)) return DM_AI_DATA_DENIED;
+  old_n = s_rec_n;
+  memcpy(previous, s_recs, sizeof(previous));
+  for (i = found; i + 1 < s_rec_n; i++) s_recs[i] = s_recs[i + 1];
+  s_rec_n--;
+  memset(&s_recs[s_rec_n], 0, sizeof(s_recs[s_rec_n]));
+  if (store_save() != 0)
+    {
+      memcpy(s_recs, previous, sizeof(previous));
+      s_rec_n = old_n;
+      return DM_AI_DATA_SAVE;
+    }
+  dm_health_refresh();
+  return 0;
+}
+
 void dm_health_voice_advice(const char *user_text, char *out, int cap)
 {
   int score;
@@ -855,12 +943,29 @@ void dm_health_voice_advice(const char *user_text, char *out, int cap)
     {
       return;
     }
+  if (!dm_ai_permission_allowed(DM_AI_COMPANION))
+    {
+      dm_ai_log_add(DM_AI_LOG_ADVICE, DM_AI_LOG_DENIED,
+                     DM_AI_LOG_REASON_PERMISSION, DM_AI_COMPANION, 0, -2);
+      out[0] = '\0';
+      return;
+    }
+  if (!dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+    {
+      dm_ai_log_add(DM_AI_LOG_READ_HEALTH, DM_AI_LOG_DENIED,
+                     DM_AI_LOG_REASON_PERMISSION, DM_AI_READ_HEALTH, 0, -2);
+      snprintf(out, (size_t)cap, "%s",
+               "我在这里陪你。可以先深呼吸、喝点水，或者休息一下。");
+      return;
+    }
   health_rollover_if_new_day();
   score = dm_health_score();
   has_data = s_last_has_mood || s_last_has_beh;
   water = dm_water_today_cups();
   focus = g_dm.focus_done_min;
   (void)dm_med_today_stats(&sched, &taken);
+  dm_ai_log_add(DM_AI_LOG_READ_HEALTH, DM_AI_LOG_SUCCESS,
+                 DM_AI_LOG_REASON_NONE, DM_AI_PERMISSION_COUNT, 0, 0);
   is_down = health_voice_is_down(user_text);
 
   if (is_down)
@@ -1217,7 +1322,16 @@ void dm_health_add_game_ms(int ms)
     {
       s_game_ms = 4 * 3600 * 1000;
     }
-  store_save();
+  if (s_game_ms - s_game_saved_ms >= 60000)
+    {
+      if (store_save() == 0) s_game_saved_ms = s_game_ms;
+    }
+}
+
+void dm_health_flush_game(void)
+{
+  if (s_game_ms != s_game_saved_ms && store_save() == 0)
+    s_game_saved_ms = s_game_ms;
 }
 
 static void rebuild_list(void)
@@ -1470,6 +1584,9 @@ static void seg_cb(lv_event_t *e)
 static void save_cb(lv_event_t *e)
 {
   dm_mood_rec_t rec;
+  dm_mood_rec_t previous[DM_MOOD_REC_MAX];
+  int old_count = s_rec_n;
+  memcpy(previous, s_recs, sizeof(previous));
   (void)e;
 
   if (s_pick_mask == 0 && s_pick_quick == 0)
@@ -1497,7 +1614,13 @@ static void save_cb(lv_event_t *e)
       s_recs[0] = rec;
     }
 
-  store_save();
+  if (store_save() != 0)
+    {
+      memcpy(s_recs, previous, sizeof(previous));
+      s_rec_n = old_count;
+      dm_say("保存失败，请稍后重试", "Save failed; retry");
+      return;
+    }
   dm_health_refresh();
   dm_show(PAGE_HEALTH);
 }

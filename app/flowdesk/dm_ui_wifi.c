@@ -845,8 +845,8 @@ static void time_apply_cb(lv_event_t *e)
 {
   struct tm requested;
   struct tm verify;
-  struct timeval tv;
   time_t epoch;
+  int rc;
 
   (void)e;
   if (s_time_value[0] < 2024 || s_time_value[0] > 2099 ||
@@ -888,26 +888,24 @@ static void time_apply_cb(lv_event_t *e)
       return;
     }
 
-  tv.tv_sec = epoch;
-  tv.tv_usec = 0;
-  if (settimeofday(&tv, NULL) != 0)
+  rc = dm_wifi_set_manual_time(epoch);
+  if (rc != 0)
     {
       if (s_time_hint_l)
         {
           lv_label_set_text(s_time_hint_l,
-                            dm_t("设置失败，请确认系统允许改时钟",
-                                 "Set failed; clock change may be restricted"));
+                            dm_t("时间未生效，请查看串口校时日志",
+                                 "Clock not applied; check serial log"));
         }
       return;
     }
 
-  dm_wifi_manual_time_mark();
   time_refresh_labels();
   if (s_time_hint_l)
     {
       lv_label_set_text(s_time_hint_l,
-                        dm_t("已设置；网络 NTP 同步后会自动校正",
-                             "Set; NTP will correct it when available"));
+                        dm_t("本次开机已校准，可使用语音聊天",
+                             "Clock ready for voice this boot"));
     }
 }
 
@@ -968,6 +966,19 @@ static void create_time_set_page(void)
 }
 
 /* ---------- pages ---------- */
+
+static void open_permissions(lv_event_t *event)
+{
+  (void)event;
+  dm_show(PAGE_PERMISSIONS);
+}
+
+static void open_ai_log(lv_event_t *event)
+{
+  (void)event;
+  dm_show(PAGE_AI_LOG);
+  dm_ai_log_tick();
+}
 
 void dm_create_settings(void)
 {
@@ -1051,6 +1062,39 @@ void dm_create_settings(void)
   }
   arrow = dm_lbl(c_app, "›", "›", g_dm_font_m, C_MUTED);
   lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+
+  {
+    lv_obj_t *permissions = card(sc, 56);
+    lv_obj_set_width(permissions, 288);
+    lv_obj_add_flag(permissions, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(permissions, open_permissions, LV_EVENT_CLICKED, NULL);
+    name = dm_lbl(permissions, "权限管理", "AI permissions", g_dm_font_s, C_INK);
+    lv_obj_set_pos(name, 0, 2);
+    {
+      lv_obj_t *sub = dm_lbl(permissions, "管理 AI 本地操作与应用访问",
+                             "Manage AI local actions", g_dm_font_s, C_MUTED);
+      lv_obj_set_pos(sub, 0, 22);
+    }
+    arrow = dm_lbl(permissions, "›", "›", g_dm_font_m, C_MUTED);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+  }
+
+  /* AI activity follows permission management in the settings list. */
+  {
+    lv_obj_t *activity = card(sc, 56);
+    lv_obj_set_width(activity, 288);
+    lv_obj_add_flag(activity, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(activity, open_ai_log, LV_EVENT_CLICKED, NULL);
+    name = dm_lbl(activity, "AI操作记录", "AI activity", g_dm_font_s, C_INK);
+    lv_obj_set_pos(name, 0, 2);
+    {
+      lv_obj_t *sub = dm_lbl(activity, "查看访问对象、结果与拦截原因",
+                             "Access, results and denials", g_dm_font_s, C_MUTED);
+      lv_obj_set_pos(sub, 0, 22);
+    }
+    arrow = dm_lbl(activity, "›", "›", g_dm_font_m, C_MUTED);
+    lv_obj_align(arrow, LV_ALIGN_RIGHT_MID, -4, 0);
+  }
 
   /* Volume settings entry */
   {

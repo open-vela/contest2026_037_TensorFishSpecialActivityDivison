@@ -24,7 +24,7 @@ static lv_obj_t *s_row_sub[VOICE_ROWS];
 static lv_obj_t *s_cur_l;
 static lv_obj_t *s_tip_l;
 static volatile int s_preview_busy;
-static volatile int s_preview_done;
+static int s_preview_done;
 static volatile int s_preview_ok;
 
 struct voice_preview_job_s
@@ -39,7 +39,7 @@ static void *voice_preview_worker(void *arg)
 
   free(job);
   s_preview_ok = (dm_voice_profile_preview(profile_idx) == 0);
-  s_preview_done = 1;
+  __atomic_store_n(&s_preview_done, 1, __ATOMIC_RELEASE);
   return NULL;
 }
 
@@ -67,7 +67,7 @@ static void request_preview(int profile_idx)
     }
   job->profile_idx = profile_idx;
   s_preview_busy = 1;
-  s_preview_done = 0;
+  __atomic_store_n(&s_preview_done, 0, __ATOMIC_RELEASE);
 
   pthread_attr_init(&attr);
   pthread_attr_setstacksize(&attr, DM_VOICE_NET_WORKER_STACK);
@@ -91,12 +91,12 @@ static void request_preview(int profile_idx)
 
 void dm_voice_sel_tick(void)
 {
-  if (!s_preview_done)
+  if (!__atomic_load_n(&s_preview_done, __ATOMIC_ACQUIRE))
     {
       return;
     }
 
-  s_preview_done = 0;
+  __atomic_store_n(&s_preview_done, 0, __ATOMIC_RELEASE);
   s_preview_busy = 0;
   if (s_tip_l)
     {

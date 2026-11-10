@@ -1,0 +1,58 @@
+diff --git a/lichee/tools/scripts/pack_img.sh b/lichee/tools/scripts/pack_img.sh
+index 5778a5f8..9d212dbd 100755
+--- a/lichee/tools/scripts/pack_img.sh
++++ b/lichee/tools/scripts/pack_img.sh
+@@ -986,31 +986,37 @@ function do_finish()
+ 	cd ..
+ 	printf "pack finish\n"
+ 
+-	[ -e ${PACK_TOPDIR}/tools/scripts/.hooks/post-dragon ] &&
+-		source ${PACK_TOPDIR}/tools/scripts/.hooks/post-dragon
++	if [ -e "${PACK_TOPDIR}/tools/scripts/.hooks/post-dragon" ]; then
++		source "${PACK_TOPDIR}/tools/scripts/.hooks/post-dragon" || return $?
++	fi
++	return 0
+ }
+ 
+ function do_dragon()
+ {
+ 	local partition_file_name="x$2"
+-	if [ $partition_file_name != "x" ]; then
++	local dragon_status
++	if [ "$partition_file_name" != "x" ]; then
+ 		echo ====================================
+ 		echo show \"$2\" message
+-		show_partition_message $2
+-	fi
+-	${DRAGON} $@
+-	echo "-----------${IMG_NAME}----------------"
+-	if [ $? -eq 0 ]; then
+-		if [ -e ${IMG_NAME} ]; then
+-			mv ${IMG_NAME} ../${IMG_NAME}
+-			echo "----------${image_instruction}----------"
+-			echo '----------image is at----------'
+-			echo -e '\033[0;31;1m'
+-			echo ${ROOT_DIR}/${PACK_PROJECT_PATH}/${IMG_NAME}
+-			echo -e '\033[0m'
+-		fi
++		show_partition_message "$2"
+ 	fi
++	${DRAGON} "$@"
++	dragon_status=$?
+ 
++	if [ "$dragon_status" -ne 0 ]; then
++		pack_error "dragon failed (exit $dragon_status); no image generated"
++		exit "$dragon_status"
++	fi
++	if [ ! -s "$IMG_NAME" ]; then
++		pack_error "dragon returned without creating $IMG_NAME"
++		exit 1
++	fi
++	mv -- "$IMG_NAME" "../$IMG_NAME" || exit 1
++	echo "-----------${IMG_NAME}----------------"
++	echo "----------${image_instruction}----------"
++	echo '----------image is at----------'
++	echo "${ROOT_DIR}/${PACK_PROJECT_PATH}/${IMG_NAME}"
+ }
+ 
+ function do_signature_ih()

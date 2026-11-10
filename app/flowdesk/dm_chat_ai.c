@@ -3,6 +3,7 @@
  ****************************************************************************/
 
 #include "deskmate.h"
+#include "dm_ai_permissions.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,6 @@
 /* MiMo OpenAI-compatible endpoint. Store the rotated key only on-device. */
 #define MIMO_BASE "https://token-plan-sgp.xiaomimimo.com/v1"
 #define MIMO_KEY_PATH "/data/deskmate_mimo.key"
-#define MIMO_EMBEDDED_KEY "tp-simy1sj9m4td099i6utgbahxor4d1wvmyodrfy3yahia4sv5"
 #define MIMO_CURL_CONFIG "/tmp/dm_chat_mimo.conf"
 #define MIMO_MODEL "mimo-v2.6-flash"
 #define CHAT_REQ_PATH "/tmp/dm_chat_req.json"
@@ -39,8 +39,7 @@ static int chat_key_load(char *key, size_t key_cap)
   f = fopen(MIMO_KEY_PATH, "rb");
   if (!f)
     {
-      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
-      return key[0] != '\0';
+      return 0;
     }
   if (fgets(key, (int)key_cap, f))
     {
@@ -66,8 +65,6 @@ static int chat_key_load(char *key, size_t key_cap)
   if (!valid)
     {
       memset(key, 0, key_cap);
-      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
-      valid = key[0] != '\0';
     }
   return valid;
 }
@@ -151,6 +148,18 @@ static int run_curl_command(const char *url, const char *request_path,
 static char s_last_reply[CHAT_MAX_REPLY];
 static int s_last_request_remote_ok;
 static int s_last_request_intent_ok;
+static int s_last_reply_health;
+static int s_last_reply_local;
+
+int dm_chat_ai_local_reply(void)
+{
+  return s_last_reply_local;
+}
+
+int dm_chat_ai_health_reply(void)
+{
+  return s_last_reply_health;
+}
 static char s_persona_ctx[512];
 
 static const char *const s_local_lines[] = {
@@ -260,6 +269,7 @@ static struct
 {
   char user[HIST_LINE];
   char bot[HIST_LINE];
+  bool private_context;
 } s_hist[HIST_TURN_MAX];
 static int s_hist_n;
 
@@ -268,7 +278,8 @@ void dm_chat_hist_reset(void)
   s_hist_n = 0;
 }
 
-void dm_chat_hist_push(const char *user, const char *assistant)
+static void chat_hist_push(const char *user, const char *assistant,
+                           bool private_context)
 {
   int i;
 
@@ -295,11 +306,23 @@ void dm_chat_hist_push(const char *user, const char *assistant)
     {
       s_hist[s_hist_n].bot[0] = '\0';
     }
+  s_hist[s_hist_n].private_context = private_context;
   s_hist_n++;
 }
 
+void dm_chat_hist_push(const char *user, const char *assistant)
+{
+  /* A turn generated with record access may repeat data from its context. */
+  chat_hist_push(user, assistant, dm_ai_permission_allowed(DM_AI_READ_HEALTH));
+}
+
+void dm_chat_hist_push_health(const char *user, const char *assistant)
+{
+  chat_hist_push(user, assistant, true);
+}
+
 /* emit {"role":..,"content":..}, entries (each with trailing comma) */
-int dm_chat_hist_json(char *out, int cap)
+int dm_chat_hist_json_for_cloud(char *out, int cap, bool allow_health)
 {
   char esc[HIST_LINE * 2];
   int o = 0;
@@ -309,11 +332,13 @@ int dm_chat_hist_json(char *out, int cap)
     {
       return -1;
     }
+  allow_health = allow_health && dm_ai_permission_allowed(DM_AI_READ_HEALTH);
   out[0] = '\0';
   for (i = 0; i < s_hist_n; i++)
     {
       int n;
 
+      if (s_hist[i].private_context && !allow_health) continue;
       if (s_hist[i].user[0])
         {
           json_escape(s_hist[i].user, esc, sizeof(esc));
@@ -340,6 +365,11 @@ int dm_chat_hist_json(char *out, int cap)
         }
     }
   return o;
+}
+
+int dm_chat_hist_json(char *out, int cap)
+{
+  return dm_chat_hist_json_for_cloud(out, cap, true);
 }
 
 static void extract_content(const char *path, char *out, size_t cap)
@@ -441,20 +471,31 @@ const char *dm_chat_ai_ask(const char *user_text)
   int write_ok;
   int close_rc;
   int curl_rc;
+  int intent_result;
+  bool private_context;
 
   s_last_reply[0] = '\0';
   s_last_request_remote_ok = 0;
   s_last_request_intent_ok = 0;
+  s_last_reply_health = 0;
+  s_last_reply_local = 0;
   if (!user_text || !user_text[0])
     {
       return local_reply("");
     }
 
-  if (dm_assistant_intent_try(user_text, s_last_reply,
-                               sizeof(s_last_reply)) > 0)
+  intent_result = dm_assistant_intent_try(user_text, s_last_reply,
+                                           sizeof(s_last_reply));
+  if (intent_result > 0)
     {
       s_last_request_intent_ok = 1;
-      dm_chat_hist_push(user_text, s_last_reply);
+      s_last_reply_local = intent_result == 4;
+      if (s_last_reply_local) return s_last_reply;
+      s_last_reply_health = intent_result == 3 || intent_result == 5;
+      /* Deterministic health queries never become model conversation facts. */
+      if (intent_result == 5) return s_last_reply;
+      if (s_last_reply_health) dm_chat_hist_push_health(user_text, s_last_reply);
+      else dm_chat_hist_push(user_text, s_last_reply);
       return s_last_reply;
     }
 
@@ -480,14 +521,16 @@ const char *dm_chat_ai_ask(const char *user_text)
       return local_reply(user_text);
     }
 
-  persona_src = s_persona_ctx[0] ? s_persona_ctx
+  private_context = dm_ai_permission_allowed(DM_AI_READ_HEALTH);
+  persona_src = private_context &&
+                s_persona_ctx[0] ? s_persona_ctx
                                  : "你是openvela小助手，桌边陪伴助手，回答简洁温暖，不超过80字，用中文。只提供建议；不要声称已启动计时、保存备忘或创建提醒，除非应用明确反馈执行成功。遇到情绪困扰时给予温和、非诊断性的支持。";
   if (json_escape(persona_src, persona, sizeof(persona)) < 0)
     {
       return local_reply(user_text);
     }
 
-  dm_chat_hist_json(hist, sizeof(hist));
+  dm_chat_hist_json_for_cloud(hist, sizeof(hist), private_context);
   n = snprintf(body, sizeof(body),
                "{\"model\":\"%s\",\"messages\":["
                "{\"role\":\"system\",\"content\":\"%s\"},"
@@ -515,6 +558,8 @@ const char *dm_chat_ai_ask(const char *user_text)
     }
 
   unlink(CHAT_RSP_PATH);
+  if (private_context && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+    return local_reply("权限已更新");
   curl_rc = run_curl_command(MIMO_BASE "/chat/completions",
                              CHAT_REQ_PATH, CHAT_RSP_PATH, 20);
   if (curl_rc != 0)
@@ -532,7 +577,8 @@ const char *dm_chat_ai_ask(const char *user_text)
   if (s_last_reply[0])
     {
       s_last_request_remote_ok = 1;
-      dm_chat_hist_push(user_text, s_last_reply);
+      s_last_reply_health = private_context;
+      chat_hist_push(user_text, s_last_reply, private_context);
     }
   else
     {

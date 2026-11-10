@@ -6,6 +6,7 @@
 
 #include "deskmate.h"
 #include "dm_voice.h"
+#include "dm_ai_permissions.h"
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -28,7 +29,11 @@ static volatile int s_job;
 static volatile int s_rec_sec;
 static uint64_t s_rec_started_ms;
 static volatile int s_mic_err;
-static volatile int s_out_ready; /* 1=text 2=microphone error */
+static int s_out_ready; /* 1=text 2=microphone error */
+static bool s_out_local;
+static bool s_last_ans_local;
+static bool s_out_health;
+static bool s_last_ans_health;
 
 static char s_pending[CHAT_LINE_MAX];
 static char s_last_ans[CHAT_LINE_MAX];
@@ -103,6 +108,8 @@ static void *voice_worker(void *arg)
   int voice_rc;
 
   (void)arg;
+  s_out_local = false;
+  s_out_health = false;
 
   if (s_job == 1)
     {
@@ -116,7 +123,7 @@ static void *voice_worker(void *arg)
           snprintf(s_out_sub, sizeof(s_out_sub), "%s",
                    dm_t("检查麦克风和 /dev/audio/pcm0c",
                         "Check the microphone and /dev/audio/pcm0c"));
-          s_out_ready = 1;
+          __atomic_store_n(&s_out_ready, 1, __ATOMIC_RELEASE);
           return NULL;
         }
 
@@ -126,13 +133,21 @@ static void *voice_worker(void *arg)
                                        sizeof(reply));
       if (voice_rc >= 0)
         {
+          s_out_local = voice_rc == 3;
+          s_out_health = dm_voice_health_reply() != 0;
           snprintf(s_out_ans, sizeof(s_out_ans), "%s", reply);
           snprintf(s_out_sub, sizeof(s_out_sub), "%s",
-                   voice_rc == 0
+                   voice_rc == 3
+                     ? dm_t("本地记录仅在设备显示，不上传云端播报",
+                            "Local records stay on device; no cloud TTS")
+                     : voice_rc == 2
+                     ? dm_t("健康结果仅本地显示，未上传云端播报",
+                            "Health result kept local; no cloud TTS")
+                     : voice_rc == 0
                      ? dm_t("已通过喇叭播放回复", "Reply played on speaker")
                      : dm_t("文字回复已显示，语音播报失败",
                             "Text reply shown; speech playback failed"));
-          s_out_ready = 1;
+          __atomic_store_n(&s_out_ready, 1, __ATOMIC_RELEASE);
         }
       else
         {
@@ -179,18 +194,41 @@ static void *voice_worker(void *arg)
                               "Check recording/mic or tap the face for text chat"));
                 break;
             }
-          s_out_ready = 1;
+          __atomic_store_n(&s_out_ready, 1, __ATOMIC_RELEASE);
         }
     }
   else if (s_job == 2)
     {
       const char *r = dm_chat_ai_ask(s_pending);
       snprintf(s_out_ans, sizeof(s_out_ans), "%s", r ? r : "……");
-      if (r && r[0] &&
+      s_out_local = dm_chat_ai_local_reply() != 0;
+      s_out_health = dm_chat_ai_health_reply() != 0;
+      if (s_out_local)
+        {
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("本地记录仅在设备显示，不上传云端播报",
+                        "Local records stay on device; no cloud TTS"));
+        }
+      else if (dm_chat_ai_health_reply() &&
+          !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+        {
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                   dm_t("健康结果仅本地显示，未上传云端播报",
+                        "Health result kept local; no cloud TTS"));
+        }
+      else if (r && r[0] &&
           (dm_chat_ai_remote_ok() ||
            (dm_chat_ai_intent_ok() && dm_wifi_connected())))
         {
-          if (dm_voice_tts_play(r) == 0)
+          voice_rc = dm_chat_ai_health_reply()
+                       ? dm_voice_tts_play_private(r) : dm_voice_tts_play(r);
+          if (voice_rc == 2)
+            {
+              snprintf(s_out_sub, sizeof(s_out_sub), "%s",
+                       dm_t("健康结果仅本地显示，未上传云端播报",
+                            "Health result kept local; no cloud TTS"));
+            }
+          else if (voice_rc == 0)
             {
               snprintf(s_out_sub, sizeof(s_out_sub), "%s",
                        dm_chat_ai_intent_ok()
@@ -219,7 +257,7 @@ static void *voice_worker(void *arg)
         {
           s_out_sub[0] = '\0';
         }
-      s_out_ready = 1;
+      __atomic_store_n(&s_out_ready, 1, __ATOMIC_RELEASE);
     }
   return NULL;
 }
@@ -237,7 +275,7 @@ static void kick_job(int job)
   s_job = job;
   s_ui_rec = false;
   s_rec_sec = 0;
-  s_out_ready = 0;
+  __atomic_store_n(&s_out_ready, 0, __ATOMIC_RELEASE);
   s_out_ans[0] = '\0';
   s_out_sub[0] = '\0';
 
@@ -308,7 +346,7 @@ static void ptt_click(lv_event_t *e)
         }
       s_mic_err = 0;
       dm_voice_set_speaker_volume(80);
-      rec_rc = dm_voice_rec_start(6);
+      rec_rc = dm_voice_rec_start(10);
       if (rec_rc != 0)
         {
           if (rec_rc == -EBUSY)
@@ -414,10 +452,34 @@ void dm_create_chat(void)
 
 void dm_chat_tick(void)
 {
-  /* apply worker results on LVGL thread */
-  if (s_out_ready)
+  if (s_last_ans_health && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
     {
-      s_out_ready = 0;
+      set_ans(dm_t("读取健康记录权限已关闭", "Health record access is disabled"));
+      set_sub(dm_t("健康结果已从聊天页隐藏", "Previous health result hidden"));
+      s_last_ans_health = false;
+    }
+  if (s_last_ans_local && !dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA))
+    {
+      set_ans(dm_t("本地生活数据读取权限已关闭", "Local data access is disabled"));
+      set_sub(dm_t("已有内容已从聊天页隐藏", "Previous local result hidden"));
+      s_last_ans_local = false;
+    }
+  /* apply worker results on LVGL thread */
+  if (__atomic_load_n(&s_out_ready, __ATOMIC_ACQUIRE))
+    {
+      __atomic_store_n(&s_out_ready, 0, __ATOMIC_RELEASE);
+      if (s_out_local && !dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA))
+        {
+          snprintf(s_out_ans, sizeof(s_out_ans), "%s", "本地生活数据读取权限已关闭，内容不会显示。");
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s", "请到权限管理检查读取开关");
+        }
+      if (s_out_health && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+        {
+          snprintf(s_out_ans, sizeof(s_out_ans), "%s", "读取健康记录权限已关闭，已有健康数据不会显示。");
+          snprintf(s_out_sub, sizeof(s_out_sub), "%s", "请到权限管理检查读取开关");
+        }
+      s_last_ans_local = s_out_local;
+      s_last_ans_health = s_out_health;
       if (s_out_ans[0])
         {
           set_ans(s_out_ans);

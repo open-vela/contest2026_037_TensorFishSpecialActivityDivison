@@ -7,6 +7,7 @@
  */
 
 #include "deskmate.h"
+#include "dm_ai_permissions.h"
 #include "dm_voice.h"
 #include "dm_tts_voice.h"
 #include <system/nxplayer.h>
@@ -32,7 +33,6 @@
 
 #define VOICE_BASE   "https://token-plan-sgp.xiaomimimo.com/v1"
 #define MIMO_KEY_PATH "/data/deskmate_mimo.key"
-#define MIMO_EMBEDDED_KEY "tp-simy1sj9m4td099i6utgbahxor4d1wvmyodrfy3yahia4sv5"
 #define MIMO_CURL_CONFIG "/tmp/dm_voice_mimo.conf"
 #define ASR_MODEL    "mimo-v2.5-asr"
 #define TTS_MODEL    "mimo-v2.5-tts"
@@ -75,6 +75,12 @@ static int s_meeting_progress_total;
 static pthread_mutex_t s_meeting_progress_lock = PTHREAD_MUTEX_INITIALIZER;
 static int s_speaker_vol = 80; /* percent */
 static volatile dm_voice_failure_t s_last_failure = DM_VOICE_FAILURE_NONE;
+static int s_health_reply;
+
+int dm_voice_health_reply(void)
+{
+  return s_health_reply;
+}
 
 dm_voice_failure_t dm_voice_last_failure(void)
 {
@@ -759,8 +765,7 @@ static int voice_key_load(char *key, size_t key_cap)
   f = fopen(MIMO_KEY_PATH, "rb");
   if (!f)
     {
-      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
-      return key[0] != '\0';
+      return 0;
     }
 
   if (fgets(key, (int)key_cap, f))
@@ -788,8 +793,6 @@ static int voice_key_load(char *key, size_t key_cap)
   if (!valid)
     {
       memset(key, 0, key_cap);
-      snprintf(key, key_cap, "%s", MIMO_EMBEDDED_KEY);
-      valid = key[0] != '\0';
     }
   return valid;
 }
@@ -1011,8 +1014,8 @@ static int voice_wait_for_wifi(void)
   return -1;
 }
 
-static int http_post_json(const char *path, const char *json_body,
-                          const char *out_path)
+static int http_post_json_checked(const char *path, const char *json_body,
+                                  const char *out_path, bool health_required)
 {
   char url[160];
   FILE *f;
@@ -1045,6 +1048,8 @@ static int http_post_json(const char *path, const char *json_body,
       return -1;
     }
 
+  /* Wi-Fi / clock waits may outlive the permission that allowed this body. */
+  if (health_required && !dm_ai_permission_allowed(DM_AI_READ_HEALTH)) return -2;
   f = fopen(JSON_REQ, "w");
   if (!f)
     {
@@ -1071,6 +1076,8 @@ static int http_post_json(const char *path, const char *json_body,
     }
 
   syslog(LOG_INFO, "[dm-voice] curl request configured; NSH argv kept minimal\n");
+  if (health_required && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+    { unlink(JSON_REQ); return -2; }
   rc = run_curl_command(url, JSON_REQ, out_path, 25);
 
   if (rc != 0)
@@ -1087,6 +1094,12 @@ static int http_post_json(const char *path, const char *json_body,
       syslog(LOG_INFO, "[dm-voice] HTTP request completed\n");
     }
   return rc;
+}
+
+static int http_post_json(const char *path, const char *json_body,
+                          const char *out_path)
+{
+  return http_post_json_checked(path, json_body, out_path, false);
 }
 
 static cJSON *voice_json_load(const char *path, long max_size)
@@ -1462,12 +1475,14 @@ static int asr_wav(const char *wav, char *text, int cap)
   return 0;
 }
 
-static int chat_reply(const char *user, char *out, int cap)
+static int chat_reply(const char *user, char *out, int cap,
+                       bool *health_context)
 {
   char esc[400];
   char hist[1400];
   char body[2400];
   int n;
+  bool private_context;
   cJSON *root;
   cJSON *message;
   cJSON *content;
@@ -1481,7 +1496,9 @@ static int chat_reply(const char *user, char *out, int cap)
     {
       return -1;
     }
-  dm_chat_hist_json(hist, sizeof(hist));
+  private_context = dm_ai_permission_allowed(DM_AI_READ_HEALTH);
+  *health_context = private_context;
+  dm_chat_hist_json_for_cloud(hist, sizeof(hist), private_context);
 
   n = snprintf(body, sizeof(body),
                "{\"model\":\"%s\",\"messages\":["
@@ -1494,8 +1511,13 @@ static int chat_reply(const char *user, char *out, int cap)
     {
       return -1;
     }
+  if (private_context && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+    {
+      snprintf(out, (size_t)cap, "%s", "权限已更新，请重新发送本次聊天。");
+      return 0;
+    }
   syslog(LOG_INFO, "[dm-voice] chat completion request start\n");
-  if (http_post_json("/chat/completions", body, TXT_CHAT) != 0)
+  if (http_post_json_checked("/chat/completions", body, TXT_CHAT, private_context) != 0)
     {
       syslog(LOG_ERR, "[dm-voice] chat completion HTTP request failed\n");
       return -1;
@@ -1519,7 +1541,8 @@ static int chat_reply(const char *user, char *out, int cap)
     {
       syslog(LOG_INFO, "[dm-voice] chat completion success reply_bytes=%u\n",
              (unsigned int)strlen(out));
-      dm_chat_hist_push(user, out);
+      if (private_context) dm_chat_hist_push_health(user, out);
+      else dm_chat_hist_push(user, out);
       return 0;
     }
   syslog(LOG_ERR,
@@ -1528,7 +1551,7 @@ static int chat_reply(const char *user, char *out, int cap)
 }
 
 static int tts_synth(const char *text, const char *wav_path,
-                     const char *voice_id)
+                     const char *voice_id, bool health_required)
 {
   char esc[1200];
   char voice_esc[64];
@@ -1566,10 +1589,11 @@ static int tts_synth(const char *text, const char *wav_path,
       return -1;
     }
   syslog(LOG_INFO, "[dm-voice] TTS request start\n");
-  if (http_post_json("/chat/completions", body, TXT_CHAT) != 0)
+  n = http_post_json_checked("/chat/completions", body, TXT_CHAT, health_required);
+  if (n != 0)
     {
       syslog(LOG_ERR, "[dm-voice] TTS HTTP request failed\n");
-      return -1;
+      return n == -2 ? -2 : -1;
     }
 
   root = voice_json_load(TXT_CHAT, 4 * 1024 * 1024);
@@ -1667,6 +1691,9 @@ static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
   const char *asr_path;
   int play_rc = -1;
   int intent_handled;
+  bool health_context = false;
+
+  s_health_reply = 0;
 
   if (!wav_path || !reply || cap < 8)
     {
@@ -1695,11 +1722,19 @@ static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
 
   s_st = DM_VOICE_CHAT;
   intent_handled = dm_assistant_intent_try(text, reply, cap);
+  s_health_reply = intent_handled == 3 || intent_handled == 5;
   if (intent_handled > 0)
     {
-      dm_chat_hist_push(text, reply);
+      if (intent_handled == 4)
+        {
+          s_st = DM_VOICE_IDLE;
+          return 3; /* Existing life records stay local: no history or TTS. */
+        }
+      if (intent_handled == 5) { /* A real health query is not chat history. */ }
+      else if (intent_handled == 3) dm_chat_hist_push_health(text, reply);
+      else dm_chat_hist_push(text, reply);
     }
-  else if (chat_reply(text, reply, cap) != 0)
+  else if (chat_reply(text, reply, cap, &health_context) != 0)
     {
       if (s_last_failure == DM_VOICE_FAILURE_NONE)
         {
@@ -1709,6 +1744,14 @@ static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
       reply[cap - 1] = '\0';
       s_st = DM_VOICE_ERR;
       return -1;
+    }
+
+  s_health_reply = s_health_reply || health_context;
+  if (s_health_reply &&
+      !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+    {
+      s_st = DM_VOICE_IDLE;
+      return 2; /* Local display only: no health-derived text sent to cloud TTS. */
     }
 
   /* Preserve the text answer even if playback fails; the caller can show
@@ -1726,8 +1769,12 @@ static int voice_asr_chat_tts_unlocked(const char *wav_path, char *reply,
     }
   else
     {
+      if (s_health_reply && !dm_ai_permission_allowed(DM_AI_READ_HEALTH))
+        { s_st = DM_VOICE_IDLE; return 2; }
       s_st = DM_VOICE_TTS;
-      if (tts_synth(reply, WAV_TTS, dm_voice_profile_api_id()) == 0)
+      int synth_rc = tts_synth(reply, WAV_TTS, dm_voice_profile_api_id(), s_health_reply);
+      if (synth_rc == -2) { s_st = DM_VOICE_IDLE; return 2; }
+      if (synth_rc == 0)
         {
           s_st = DM_VOICE_PLAY;
           play_rc = play_wav(WAV_TTS);
@@ -1751,15 +1798,18 @@ int dm_voice_asr_chat_tts(const char *wav_path, char *reply, int cap)
   return rc;
 }
 
-static int voice_tts_play_unlocked(const char *text)
+static int voice_tts_play_unlocked(const char *text, bool health_required)
 {
+  int synth_rc;
   s_last_failure = DM_VOICE_FAILURE_NONE;
   if (!text || !text[0])
     {
       return -1;
     }
   s_st = DM_VOICE_TTS;
-  if (tts_synth(text, WAV_TTS, dm_voice_profile_api_id()) != 0)
+  synth_rc = tts_synth(text, WAV_TTS, dm_voice_profile_api_id(), health_required);
+  if (synth_rc == -2) { s_st = DM_VOICE_IDLE; return 2; }
+  if (synth_rc != 0)
     {
       if (s_last_failure == DM_VOICE_FAILURE_NONE)
         {
@@ -1784,7 +1834,18 @@ int dm_voice_tts_play(const char *text)
   int rc;
 
   pthread_mutex_lock(&s_voice_api_lock);
-  rc = voice_tts_play_unlocked(text);
+  rc = voice_tts_play_unlocked(text, false);
+  pthread_mutex_unlock(&s_voice_api_lock);
+  return rc;
+}
+
+int dm_voice_tts_play_private(const char *text)
+{
+  int rc;
+  pthread_mutex_lock(&s_voice_api_lock);
+  /* Recheck after waiting for other audio/network users. */
+  if (!dm_ai_permission_allowed(DM_AI_READ_HEALTH)) rc = 2;
+  else rc = voice_tts_play_unlocked(text, true);
   pthread_mutex_unlock(&s_voice_api_lock);
   return rc;
 }
@@ -2116,7 +2177,7 @@ int dm_voice_meeting_analyze(const char *wav_path,
 
   meeting_speech_excerpt(summary, speech, sizeof(speech));
   s_st = DM_VOICE_TTS;
-  tts_rc = voice_tts_play_unlocked(speech);
+  tts_rc = voice_tts_play_unlocked(speech, false);
   dm_voice_meeting_progress(NULL, &progress_total);
   voice_meeting_progress_set(progress_total, progress_total);
   if (tts_rc != 0)
@@ -2219,7 +2280,7 @@ static int voice_profile_preview_unlocked(int profile_idx)
     {
       unlink(path);
       s_st = DM_VOICE_TTS;
-      if (tts_synth(sample_text, path, profile->api_id) != 0 ||
+      if (tts_synth(sample_text, path, profile->api_id, false) != 0 ||
           !voice_wav_cache_valid(path))
         {
           if (s_last_failure == DM_VOICE_FAILURE_NONE)
@@ -2278,7 +2339,7 @@ static int voice_volume_test_unlocked(void)
   if (!voice_wav_cache_valid(path))
     {
       unlink(path);
-      if (tts_synth(sample_text, path, dm_voice_profile_api_id()) != 0 ||
+      if (tts_synth(sample_text, path, dm_voice_profile_api_id(), false) != 0 ||
           !voice_wav_cache_valid(path))
         {
           int rc;

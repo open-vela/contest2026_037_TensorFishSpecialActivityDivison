@@ -3,3 +3,18 @@
 .depend
 Make.dep
 *.tmp
+
+# Device credentials and local-only configuration
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+secrets/
+# Generated firmware, archives and Python caches
+*.img
+*.zip
+__pycache__/
+*.py[cod]

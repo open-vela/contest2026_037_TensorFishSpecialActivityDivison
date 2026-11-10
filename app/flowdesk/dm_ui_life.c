@@ -4,12 +4,16 @@
 
 #include "deskmate.h"
 #include "dm_voice.h"
+#include "dm_ai_local_read.h"
+#include "dm_ai_permissions.h"
+#include "dm_ai_data.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <unistd.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -94,29 +98,41 @@ static int today_yday(void)
   return tmv.tm_yday + tmv.tm_year * 1000;
 }
 
-static void water_save(void)
+static int water_save(void)
 {
   FILE *f;
+  time_t due = s_w_due;
+  int left = s_w_left;
+  int ok, closed;
+  if (!dm_wifi_clock_valid()) return -1;
 
   if (s_w_left > 0)
     {
-      s_w_due = time(NULL) + s_w_left;
+      due = time(NULL) + s_w_left;
     }
   else if (!s_w_alert_on)
     {
-      s_w_due = time(NULL) + s_w_interval * 60;
-      s_w_left = s_w_interval * 60;
+      due = time(NULL) + s_w_interval * 60;
+      left = s_w_interval * 60;
     }
   /* when alert is on, keep due in the past until user taps 好滴 */
 
-  f = fopen(WATER_PATH, "w");
+  f = fopen(WATER_PATH ".tmp", "w");
   if (!f)
     {
-      return;
+      return -1;
     }
-  fprintf(f, "%d %d %ld %d\n", s_w_cups, s_w_interval, (long)s_w_due,
-          s_w_day);
-  fclose(f);
+  ok = fprintf(f, "%d %d %ld %d\n", s_w_cups, s_w_interval, (long)due,
+               s_w_day) > 0;
+  closed = fclose(f) == 0;
+  if (!ok || !closed || rename(WATER_PATH ".tmp", WATER_PATH) != 0)
+    {
+      unlink(WATER_PATH ".tmp");
+      return -1;
+    }
+  s_w_due = due;
+  s_w_left = left;
+  return 0;
 }
 
 static void water_load(void)
@@ -144,9 +160,9 @@ static void water_load(void)
     }
   s_w_cups = c < 0 ? 0 : c;
   s_w_interval = iv;
-  s_w_day = today_yday();
+  s_w_day = dm_wifi_clock_valid() ? today_yday() : day;
 
-  if (day != today_yday())
+  if (dm_wifi_clock_valid() && day != today_yday())
     {
       s_w_cups = 0;
       s_w_due = now + iv * 60;
@@ -323,7 +339,36 @@ static void water_reset_cb(lv_event_t *e)
 
 int dm_water_today_cups(void)
 {
-  return s_w_cups;
+  return dm_wifi_clock_valid() && s_w_day == today_yday() ? s_w_cups : 0;
+}
+
+int dm_water_ai_cups(int *cups)
+{
+  if (!dm_ai_permission_allowed(DM_AI_READ_HEALTH)) return DM_AI_DATA_DENIED;
+  if (!cups) return DM_AI_DATA_INVALID;
+  if (!dm_wifi_clock_valid()) return DM_AI_DATA_CLOCK;
+  *cups = s_w_day == today_yday() ? s_w_cups : 0;
+  return 0;
+}
+
+int dm_water_ai_delete(const dm_ai_delete_request_t *request)
+{
+  int old_cups;
+  if (!request || request->kind != DM_AI_DATA_WATER) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_WATER)) return DM_AI_DATA_DENIED;
+  if (!dm_wifi_clock_valid()) return DM_AI_DATA_CLOCK;
+  if (request->selector != DM_AI_SELECT_TODAY &&
+      request->selector != DM_AI_SELECT_CUPS) return DM_AI_DATA_UNSUPPORTED;
+  if (s_w_day != today_yday() || s_w_cups <= 0) return DM_AI_DATA_NOT_FOUND;
+  if (request->selector == DM_AI_SELECT_CUPS &&
+      (request->number < 1 || request->number > s_w_cups)) return DM_AI_DATA_NOT_FOUND;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_WATER)) return DM_AI_DATA_DENIED;
+  old_cups = s_w_cups;
+  s_w_cups = request->selector == DM_AI_SELECT_TODAY ? 0 : s_w_cups - request->number;
+  if (water_save() != 0) { s_w_cups = old_cups; return DM_AI_DATA_SAVE; }
+  water_paint();
+  dm_health_refresh();
+  return 0;
 }
 
 void dm_create_water(void)
@@ -396,6 +441,7 @@ void dm_water_tick(void)
 {
   time_t now = time(NULL);
   int left;
+  if (!dm_wifi_clock_valid()) return;
 
   if (s_w_day != today_yday())
     {
@@ -628,6 +674,60 @@ static time_t cd_alarm_time(const cd_item_t *item)
       return (time_t)-1;
     }
   return target;
+}
+
+int dm_countdown_ai_snapshot(dm_ai_local_record_t *out, int cap)
+{
+  int i, n;
+  if (!dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA)) return -2;
+  if (!out || cap < 1) return -1;
+  n = s_cd_n < cap ? s_cd_n : cap;
+  for (i = 0; i < n; i++)
+    {
+      memset(&out[i], 0, sizeof(out[i]));
+      snprintf(out[i].title, sizeof(out[i].title), "%s", s_cd[i].name);
+      out[i].year = s_cd[i].y;
+      out[i].month = s_cd[i].m;
+      out[i].day = s_cd[i].d;
+      out[i].hour = s_cd[i].hour;
+      out[i].minute = s_cd[i].minute;
+      out[i].has_time = s_cd[i].has_alarm != 0;
+    }
+  return n;
+}
+
+int dm_countdown_ai_delete(const dm_ai_delete_request_t *request)
+{
+  cd_item_t previous[CD_MAX];
+  int i, found = -1, old_n, old_sel;
+  if (!request || request->kind != DM_AI_DATA_COUNTDOWN) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_COUNTDOWN)) return DM_AI_DATA_DENIED;
+  for (i = 0; i < s_cd_n; i++)
+    if (dm_ai_data_match(request, s_cd[i].name, i + 1))
+      {
+        if (found >= 0) return DM_AI_DATA_AMBIGUOUS;
+        found = i;
+      }
+  if (found < 0) return DM_AI_DATA_NOT_FOUND;
+  if (found == s_cd_alert_idx) return DM_AI_DATA_BUSY;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_COUNTDOWN)) return DM_AI_DATA_DENIED;
+  memcpy(previous, s_cd, sizeof(previous));
+  old_n = s_cd_n;
+  old_sel = s_cd_sel;
+  for (i = found; i + 1 < s_cd_n; i++) s_cd[i] = s_cd[i + 1];
+  s_cd_n--;
+  memset(&s_cd[s_cd_n], 0, sizeof(s_cd[s_cd_n]));
+  s_cd_sel = s_cd_n ? (found < s_cd_n ? found : s_cd_n - 1) : 0;
+  if (cd_save() != 0)
+    {
+      memcpy(s_cd, previous, sizeof(previous));
+      s_cd_n = old_n;
+      s_cd_sel = old_sel;
+      return DM_AI_DATA_SAVE;
+    }
+  if (s_cd_alert_idx > found) s_cd_alert_idx--;
+  cd_paint();
+  return 0;
 }
 
 int dm_countdown_add_voice(const char *name, int year, int month, int day,

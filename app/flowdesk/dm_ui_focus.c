@@ -4,6 +4,17 @@
 
 #include "deskmate.h"
 #include <stdio.h>
+#include <time.h>
+
+static uint64_t s_focus_last_ms;
+static uint64_t s_focus_partial_ms;
+
+static uint64_t focus_now_ms(void)
+{
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -269,6 +280,8 @@ void dm_focus_start(void)
       g_dm.focus_total = g_dm.focus_left;
     }
   g_dm.focus_run = true;
+  s_focus_last_ms = focus_now_ms();
+  s_focus_partial_ms = 0;
   g_dm.focus_finished = false;
 
   dm_face_attach(g_dm_pages[PAGE_FOCUS_RUN], (DM_SCR_W - 84) / 2, 28);
@@ -367,7 +380,10 @@ void dm_focus_toggle_pause(void)
       return;
     }
 
+  if (g_dm.focus_run) dm_focus_run_tick();
+  if (g_dm.focus_finished) return;
   g_dm.focus_run = !g_dm.focus_run;
+  s_focus_last_ms = focus_now_ms();
   if (s_run_pause_lbl)
     {
       lv_label_set_text(s_run_pause_lbl,
@@ -552,23 +568,26 @@ void dm_focus_home_tick(void)
 
 void dm_focus_run_tick(void)
 {
-  static int s_sec_acc;
-
+  uint64_t now = focus_now_ms();
+  uint64_t elapsed;
+  uint64_t seconds;
   if (!(g_dm.focus_run && !g_dm.focus_finished && g_dm.focus_left > 0))
     {
-      s_sec_acc = 0;
+      s_focus_last_ms = now;
       return;
     }
-
-  /* UI tick is 250ms — only count down once per real second */
-  s_sec_acc++;
-  if (s_sec_acc < DM_TICKS_PER_SEC)
+  if (!s_focus_last_ms || now < s_focus_last_ms)
     {
+      s_focus_last_ms = now;
       return;
     }
-  s_sec_acc = 0;
-
-  g_dm.focus_left--;
+  elapsed = now - s_focus_last_ms + s_focus_partial_ms;
+  s_focus_last_ms = now;
+  s_focus_partial_ms = elapsed % 1000;
+  seconds = elapsed / 1000;
+  if (!seconds) return;
+  if (seconds >= (uint64_t)g_dm.focus_left) g_dm.focus_left = 0;
+  else g_dm.focus_left -= (int32_t)seconds;
   if (g_dm.page == PAGE_FOCUS_RUN)
     {
       dm_update_run_clock();

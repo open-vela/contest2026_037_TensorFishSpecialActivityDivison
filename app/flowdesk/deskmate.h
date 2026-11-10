@@ -8,11 +8,12 @@
 #include <nuttx/config.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include <lvgl/lvgl.h>
 
 #ifdef CONFIG_DESKMATE_APP
 
-#define DM_VER "0.19.0"
+#define DM_VER "0.20.1"
 
 #define C_BG     0x000000
 #define C_FACE   0xFFFFFF
@@ -107,6 +108,9 @@ typedef enum {
   PAGE_ALARM_ADD,
   PAGE_MEETING,
   PAGE_MEETING_DETAIL,
+  PAGE_PERMISSIONS,
+  PAGE_AI_LOG,
+  PAGE_PERMISSION_DETAIL,
   PAGE_COUNT
 } dm_page_t;
 
@@ -266,6 +270,8 @@ void dm_proactive_focus_done(int32_t minutes);
 int dm_dict_ai_define(const char *word, char *out, int cap);
 void dm_chat_tick(void);
 void dm_assistant_intent_tick(void);
+/* Positive: 1=local, 2=wake, 3=health, 4=life records (no history/TTS),
+ * 5=deterministic health query (no history; TTS requires health read access). */
 int dm_assistant_intent_try(const char *text, char *reply, int reply_cap);
 void dm_volume_tick(void);
 int dm_chat_ai_available(void);
@@ -275,7 +281,11 @@ int dm_chat_ai_intent_ok(void);
 const char *dm_chat_local_reply(const char *user_text);
 void dm_chat_hist_reset(void);
 void dm_chat_hist_push(const char *user, const char *assistant);
+void dm_chat_hist_push_health(const char *user, const char *assistant);
+int dm_chat_ai_health_reply(void);
+int dm_chat_ai_local_reply(void);
 int dm_chat_hist_json(char *out, int cap);
+int dm_chat_hist_json_for_cloud(char *out, int cap, bool allow_health);
 void dm_create_supervise(void);
 void dm_create_dock(void);
 void dm_dock_highlight(dm_page_t p);
@@ -290,6 +300,7 @@ void dm_update_run_clock(void);
 
 /* health */
 void dm_health_add_focus_min(int32_t min);
+void dm_health_flush_game(void);
 void dm_health_add_game_ms(int ms);
 int dm_water_today_cups(void);
 int dm_med_today_stats(int *sched_out, int *taken_out);
@@ -305,6 +316,9 @@ int dm_note_add_voice(const char *text);
 
 /* settings / wifi */
 void dm_create_settings(void);
+void dm_create_permissions(void);
+void dm_create_ai_log(void);
+void dm_ai_log_tick(void);
 void dm_create_features(void);
 void dm_create_wifi(void);
 void dm_create_app_connect(void);
@@ -319,6 +333,7 @@ void dm_tools_tick(void);
 void dm_life_tick(void);
 void dm_fun_tick(void);
 void dm_med_tick(void);
+int dm_med_voice_has_name(const char *text);
 int dm_med_voice_take(const char *utterance, char *reply, int reply_cap);
 void dm_wifi_tick(void);
 void dm_appconn_tick(void);
@@ -330,7 +345,8 @@ const char *dm_wifi_cur_ip(void);
 int dm_wifi_connected(void);
 int dm_wifi_wait_time_sync(int timeout_sec);
 int dm_wifi_enabled(void);
-void dm_wifi_manual_time_mark(void);
+int dm_wifi_clock_valid(void);
+int dm_wifi_set_manual_time(time_t epoch);
 void dm_wifi_manual_time_restore(void);
 int dm_wifi_set_enabled(int on);
 void dm_wifi_poll(void);

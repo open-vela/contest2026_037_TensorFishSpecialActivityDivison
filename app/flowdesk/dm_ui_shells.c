@@ -220,7 +220,8 @@ void dm_dock_highlight(dm_page_t p)
       focus_key = PAGE_FEATURES;
     }
   else if (p == PAGE_WIFI || p == PAGE_WIFI_PW || p == PAGE_WIFI_KB ||
-           p == PAGE_WIFI_CONN || p == PAGE_WIFI_DONE)
+           p == PAGE_WIFI_CONN || p == PAGE_WIFI_DONE || p == PAGE_PERMISSIONS ||
+           p == PAGE_AI_LOG || p == PAGE_PERMISSION_DETAIL)
     {
       focus_key = PAGE_SETTINGS;
     }

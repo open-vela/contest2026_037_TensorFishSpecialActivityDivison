@@ -3,6 +3,9 @@
 #include "deskmate.h"
 #include "dm_audio_vol.h"
 #include "dm_voice.h"
+#include "dm_ai_permissions.h"
+#include "dm_ai_local_read.h"
+#include "dm_ai_data.h"
 
 #ifdef CONFIG_DESKMATE_APP
 
@@ -33,6 +36,7 @@ typedef struct
   int type;
   int repeat_daily;
   int fired;
+  int pending;
   int hour;
   int minute;
   char text[REMINDER_TEXT_MAX];
@@ -41,6 +45,7 @@ typedef struct
 typedef struct
 {
   int is_alarm;
+  unsigned int generation;
   char text[REMINDER_TEXT_MAX];
 } reminder_speech_t;
 
@@ -55,9 +60,13 @@ static int s_alarm_hour = 7;
 static int s_alarm_minute;
 static int s_alarm_repeat;
 static int s_voice_busy;
+static unsigned int s_alert_generation;
+static int s_alert_sound_started;
+static time_t s_alert_shown_at;
+static int s_persistence_dirty;
+static time_t s_persistence_retry;
 static int s_voice_done;
 static int s_alarm_ring_active;
-static time_t s_speech_retry_after;
 static pthread_mutex_t s_voice_lock = PTHREAD_MUTEX_INITIALIZER;
 static lv_obj_t *s_todo_rows[REMINDER_MAX];
 static lv_obj_t *s_todo_text[REMINDER_MAX];
@@ -80,19 +89,20 @@ static void reminder_paint(void);
 
 static int reminder_save(void)
 {
-  FILE *f = fopen(REMINDER_PATH, "w");
+  FILE *f = fopen(REMINDER_PATH ".tmp", "w");
   int i;
   int ok = 1;
   if (!f)
     {
       return -1;
     }
-  for (i = 0; i < s_count; i++)
+  if (fputs("#flowdesk-reminders-v2\n", f) == EOF) ok = 0;
+  for (i = 0; ok && i < s_count; i++)
     {
-      if (fprintf(f, "%d %d %d %ld %d %d %s\n", s_items[i].type,
+      if (fprintf(f, "%d %d %d %ld %d %d %d %s\n", s_items[i].type,
                   s_items[i].repeat_daily, s_items[i].fired,
                   (long)s_items[i].due, s_items[i].hour, s_items[i].minute,
-                  s_items[i].text) < 0)
+                  s_items[i].pending, s_items[i].text) < 0)
         {
           ok = 0;
           break;
@@ -102,6 +112,8 @@ static int reminder_save(void)
     {
       ok = 0;
     }
+  if (ok && rename(REMINDER_PATH ".tmp", REMINDER_PATH) != 0) ok = 0;
+  if (!ok) unlink(REMINDER_PATH ".tmp");
   return ok ? 0 : -1;
 }
 
@@ -109,6 +121,7 @@ static void reminder_load(void)
 {
   FILE *f = fopen(REMINDER_PATH, "r");
   char line[160];
+  int version = 1;
 
   s_count = 0;
   if (!f)
@@ -118,15 +131,26 @@ static void reminder_load(void)
   while (s_count < REMINDER_MAX && fgets(line, sizeof(line), f))
     {
       int type;
+      int pending = 0;
       int repeat;
       int fired;
       int hour;
       int minute;
       long due;
       char text[REMINDER_TEXT_MAX];
-      int fields = sscanf(line, "%d %d %d %ld %d %d %63[^\r\n]",
-                          &type, &repeat, &fired, &due, &hour, &minute, text);
-      if (fields != 7 || (type != REMINDER_TODO && type != REMINDER_ALARM) ||
+      int fields;
+      if (strcmp(line, "#flowdesk-reminders-v2\n") == 0)
+        {
+          version = 2;
+          continue;
+        }
+      if (version == 2)
+        fields = sscanf(line, "%d %d %d %ld %d %d %d %63[^\r\n]",
+                        &type, &repeat, &fired, &due, &hour, &minute, &pending, text);
+      else
+        fields = sscanf(line, "%d %d %d %ld %d %d %63[^\r\n]",
+                        &type, &repeat, &fired, &due, &hour, &minute, text);
+      if (fields != (version == 2 ? 8 : 7) || pending < 0 || pending > 1 || (type != REMINDER_TODO && type != REMINDER_ALARM) ||
           repeat < 0 || repeat > 1 || fired < 0 || fired > 1 || due <= 0 ||
           hour < 0 || hour > 23 || minute < 0 || minute > 59 || !text[0])
         {
@@ -136,6 +160,7 @@ static void reminder_load(void)
       s_items[s_count].type = type;
       s_items[s_count].repeat_daily = repeat;
       s_items[s_count].fired = fired;
+      s_items[s_count].pending = pending;
       s_items[s_count].due = (time_t)due;
       s_items[s_count].hour = hour;
       s_items[s_count].minute = minute;
@@ -152,7 +177,26 @@ static int reminder_clock_valid(time_t now)
     {
       return 0;
     }
-  return tmv.tm_year + 1900 >= 2024;
+  return tmv.tm_year + 1900 >= 2024 && dm_wifi_clock_valid();
+}
+
+int dm_reminder_ai_snapshot(bool alarm, dm_ai_local_record_t *out, int cap)
+{
+  int i, n = 0;
+  if (!dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA)) return -2;
+  if (!out || cap < 1) return -1;
+  for (i = 0; i < s_count && n < cap; i++)
+    if (s_items[i].type == (alarm ? REMINDER_ALARM : REMINDER_TODO) &&
+        (!s_items[i].fired || s_items[i].pending))
+      {
+        memset(&out[n], 0, sizeof(out[n]));
+        snprintf(out[n].title, sizeof(out[n].title), "%s", s_items[i].text);
+        out[n].due = s_items[i].due;
+        out[n].repeat_daily = s_items[i].repeat_daily != 0;
+        out[n].pending = s_items[i].pending != 0;
+        n++;
+      }
+  return n;
 }
 
 static int reminder_copy_text(const char *in, char *out, size_t cap)
@@ -203,9 +247,19 @@ static int reminder_append(int type, const char *text, time_t due,
                            int repeat_daily, int hour, int minute)
 {
   reminder_t item;
+  reminder_t replaced;
+  int index = s_count;
+  int i;
   if (s_count >= REMINDER_MAX)
     {
-      return -2;
+      index = -1;
+      for (i = 0; i < s_count; i++)
+        if (s_items[i].fired && !s_items[i].pending && i != s_alert_idx)
+          {
+            index = i;
+            break;
+          }
+      if (index < 0) return -2;
     }
   if (due <= time(NULL))
     {
@@ -221,11 +275,13 @@ static int reminder_append(int type, const char *text, time_t due,
     {
       return -1;
     }
-  s_items[s_count++] = item;
+  replaced = s_items[index];
+  s_items[index] = item;
+  if (index == s_count) s_count++;
   if (reminder_save() != 0)
     {
-      s_count--;
-      memset(&s_items[s_count], 0, sizeof(s_items[s_count]));
+      s_items[index] = replaced;
+      if (index == s_count - 1 && !replaced.due) s_count--;
       return -3;
     }
   reminder_paint();
@@ -472,6 +528,44 @@ static void reminder_delete(int type)
   reminder_paint();
 }
 
+int dm_reminder_ai_delete(const dm_ai_delete_request_t *request)
+{
+  reminder_t previous[REMINDER_MAX];
+  int i, visible = 0, found = -1, type, old_count;
+  if (!request || (request->kind != DM_AI_DATA_TODO &&
+                   request->kind != DM_AI_DATA_ALARM)) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(request->kind)) return DM_AI_DATA_DENIED;
+  type = request->kind == DM_AI_DATA_ALARM ? REMINDER_ALARM : REMINDER_TODO;
+  for (i = 0; i < s_count; i++)
+    if (s_items[i].type == type && (!s_items[i].fired || s_items[i].pending))
+      {
+        visible++;
+        if (dm_ai_data_match(request, s_items[i].text, visible))
+          {
+            if (found >= 0) return DM_AI_DATA_AMBIGUOUS;
+            found = i;
+          }
+      }
+  if (found < 0) return DM_AI_DATA_NOT_FOUND;
+  if (found == s_alert_idx) return DM_AI_DATA_BUSY;
+  if (!dm_ai_data_delete_allowed(request->kind)) return DM_AI_DATA_DENIED;
+  memcpy(previous, s_items, sizeof(previous));
+  old_count = s_count;
+  for (i = found; i + 1 < s_count; i++) s_items[i] = s_items[i + 1];
+  s_count--;
+  memset(&s_items[s_count], 0, sizeof(s_items[s_count]));
+  if (reminder_save() != 0)
+    {
+      memcpy(s_items, previous, sizeof(previous));
+      s_count = old_count;
+      return DM_AI_DATA_SAVE;
+    }
+  if (s_alert_idx > found) s_alert_idx--;
+  s_todo_sel = s_alarm_sel = -1;
+  reminder_paint();
+  return 0;
+}
+
 static void todo_delete_cb(lv_event_t *e)
 {
   (void)e;
@@ -596,6 +690,15 @@ static void reminder_paint(void)
     }
 }
 
+static int reminder_speech_current(unsigned int generation)
+{
+  int active;
+  pthread_mutex_lock(&s_voice_lock);
+  active = generation == s_alert_generation;
+  pthread_mutex_unlock(&s_voice_lock);
+  return active;
+}
+
 static int reminder_alarm_is_ringing(void)
 {
   int active;
@@ -638,8 +741,8 @@ static void *reminder_speech_worker(void *arg)
         }
 
       beep_rc = -EBUSY;
-      for (attempt = 0; attempt < 12 &&
-           (!speech->is_alarm || reminder_alarm_is_ringing()); attempt++)
+      for (; reminder_speech_current(speech->generation) &&
+           (!speech->is_alarm || reminder_alarm_is_ringing()); )
         {
           beep_rc = dm_voice_beep();
           if (beep_rc != -EBUSY)
@@ -655,12 +758,14 @@ static void *reminder_speech_worker(void *arg)
                  beep_rc);
         }
 
-      if (!speech->is_alarm && !speech_attempted)
+      if (!speech->is_alarm && !speech_attempted &&
+          reminder_speech_current(speech->generation))
         {
           speech_attempted = 1;
-          if (dm_wifi_connected())
+          if (dm_wifi_connected() &&
+              dm_ai_permission_allowed(DM_AI_READ_HEALTH))
             {
-              rc = dm_voice_tts_play(line);
+              rc = dm_voice_tts_play_private(line);
             }
           if (rc != 0)
             {
@@ -723,6 +828,9 @@ static int reminder_speak(int index)
       pthread_mutex_unlock(&s_voice_lock);
       return -1;
     }
+  pthread_mutex_lock(&s_voice_lock);
+  speech->generation = s_alert_generation;
+  pthread_mutex_unlock(&s_voice_lock);
   speech->is_alarm = s_items[index].type == REMINDER_ALARM;
   snprintf(speech->text, sizeof(speech->text), "%s", s_items[index].text);
   pthread_mutex_lock(&s_voice_lock);
@@ -750,8 +858,12 @@ static void reminder_alert_dismiss(lv_event_t *e)
   (void)e;
   pthread_mutex_lock(&s_voice_lock);
   s_alarm_ring_active = 0;
+  s_alert_generation++;
   pthread_mutex_unlock(&s_voice_lock);
   s_alert_idx = -1;
+  s_alert_sound_started = 0;
+  s_persistence_dirty = 1;
+  s_persistence_retry = 0;
   if (s_alert)
     {
       lv_obj_add_flag(s_alert, LV_OBJ_FLAG_HIDDEN);
@@ -1039,42 +1151,28 @@ static void alarm_add_cb(lv_event_t *e)
 
 void dm_reminder_tick(void)
 {
-  time_t now;
+  time_t now = time(NULL);
   int i;
-  int voice_done;
   int voice_busy;
+  int changed = 0;
+  int selected = -1;
 
   pthread_mutex_lock(&s_voice_lock);
-  voice_done = s_voice_done;
-  s_voice_done = 0;
-  if (voice_done)
+  if (s_voice_done)
     {
+      s_voice_done = 0;
       s_voice_busy = 0;
     }
   voice_busy = s_voice_busy;
   pthread_mutex_unlock(&s_voice_lock);
-  if (s_alert_idx >= 0 || voice_busy)
-    {
-      return;
-    }
-  now = time(NULL);
-  if (now < s_speech_retry_after)
-    {
-      return;
-    }
-  if (!reminder_clock_valid(now))
-    {
-      return;
-    }
+  if (!reminder_clock_valid(now)) return;
+
+  /* Mark every due item, even while another alert is visible. */
   for (i = 0; i < s_count; i++)
     {
       reminder_t *item = &s_items[i];
-      reminder_t previous;
-      if (item->fired || item->due > now)
-        {
-          continue;
-        }
-      previous = *item;
+      if (item->fired || item->due > now) continue;
+      item->pending = 1;
       if (item->type == REMINDER_ALARM && item->repeat_daily)
         {
           struct tm next;
@@ -1083,54 +1181,62 @@ void dm_reminder_tick(void)
           next.tm_min = item->minute;
           next.tm_sec = 0;
           next.tm_isdst = -1;
-          if (mktime(&next) <= now)
-            {
-              next.tm_mday++;
-              next.tm_isdst = -1;
-            }
+          if (mktime(&next) <= now) next.tm_mday++;
           item->due = mktime(&next);
-          item->fired = 0;
         }
-      else
-        {
-          item->fired = 1;
-        }
-      if (reminder_save() != 0)
-        {
-          *item = previous;
-          s_speech_retry_after = now + 5;
-          syslog(LOG_ERR, "[dm-remind] unable to save due reminder\n");
-          return;
-        }
-      s_alert_idx = i;
+      else item->fired = 1;
+      changed = 1;
+    }
+
+  if (changed || (s_persistence_dirty && now >= s_persistence_retry))
+    {
+      s_persistence_dirty = reminder_save() != 0;
+      s_persistence_retry = now + 5;
+      if (s_persistence_dirty)
+        syslog(LOG_ERR, "[dm-remind] alert active; persistence retry pending\n");
+    }
+
+  for (i = 0; i < s_count; i++)
+    if (s_items[i].pending &&
+        (selected < 0 || (s_items[i].type == REMINDER_ALARM &&
+                         s_items[selected].type != REMINDER_ALARM)))
+      selected = i;
+
+  /* An alarm preempts an ordinary TODO. The interrupted TODO stays queued. */
+  if (s_alert_idx >= 0 && selected >= 0 &&
+      s_items[s_alert_idx].type == REMINDER_TODO &&
+      s_items[selected].type == REMINDER_ALARM)
+    {
+      s_items[s_alert_idx].pending = 1;
+      reminder_alert_dismiss(NULL);
+    }
+  if (s_alert_idx >= 0 && s_items[s_alert_idx].type == REMINDER_TODO &&
+      s_alert_sound_started && !voice_busy && now - s_alert_shown_at >= 10)
+    reminder_alert_dismiss(NULL);
+
+  if (s_alert_idx < 0 && selected >= 0)
+    {
+      s_alert_idx = selected;
+      s_items[selected].pending = 0;
+      s_alert_sound_started = 0;
+      s_alert_shown_at = now;
+      pthread_mutex_lock(&s_voice_lock);
+      s_alert_generation++;
+      pthread_mutex_unlock(&s_voice_lock);
       if (s_alert_title)
-        {
-          lv_label_set_text(s_alert_title,
-                            item->type == REMINDER_ALARM ? "闹钟响了" : "待办提醒");
-        }
-      if (s_alert_text)
-        {
-          lv_label_set_text(s_alert_text, item->text);
-        }
+        lv_label_set_text(s_alert_title,
+                          s_items[selected].type == REMINDER_ALARM
+                            ? "闹钟响了" : "待办提醒");
+      if (s_alert_text) lv_label_set_text(s_alert_text, s_items[selected].text);
       if (s_alert)
         {
           lv_obj_clear_flag(s_alert, LV_OBJ_FLAG_HIDDEN);
           lv_obj_move_foreground(s_alert);
         }
-      if (reminder_speak(i) != 0)
-        {
-          *item = previous;
-          (void)reminder_save();
-          s_alert_idx = -1;
-          s_speech_retry_after = now + 5;
-          if (s_alert)
-            {
-              lv_obj_add_flag(s_alert, LV_OBJ_FLAG_HIDDEN);
-            }
-          return;
-        }
-      reminder_paint();
-      return;
+    }
+  if (s_alert_idx >= 0 && !s_alert_sound_started && !voice_busy)
+    {
+      if (reminder_speak(s_alert_idx) == 0) s_alert_sound_started = 1;
     }
   reminder_paint();
 }

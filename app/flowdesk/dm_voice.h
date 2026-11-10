@@ -36,15 +36,20 @@ typedef enum {
 int dm_voice_mic_available(void);
 dm_voice_state_t dm_voice_state(void);
 dm_voice_failure_t dm_voice_last_failure(void);
+/* Most recent voice result contains health context; UI must recheck access. */
+int dm_voice_health_reply(void);
 
 /* tap-to-talk: start then stop */
 int dm_voice_rec_start(int max_seconds);
 int dm_voice_rec_stop(void);          /* 0 = got audio */
 int dm_voice_rec_active(void);
 
-/* 0=spoken reply, 1=text-only reply, <0=ASR/chat failed. */
+/* 0=spoken, 1=TTS failed, 2=health kept local, 3=life records kept local,
+ * <0=ASR/chat failed. */
 int dm_voice_asr_chat_tts(const char *wav_path, char *reply, int reply_cap);
 int dm_voice_tts_play(const char *text);
+/* Returns 2 when health-record privacy blocks uploading local text. */
+int dm_voice_tts_play_private(const char *text);
 /* Analyze a locally saved meeting WAV. Returns 0 when spoken, 1 when the
  * transcript/summary succeeded but TTS failed, and negative on analysis failure. */
 int dm_voice_meeting_analyze(const char *wav_path,

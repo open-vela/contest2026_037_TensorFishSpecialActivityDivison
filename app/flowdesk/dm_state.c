@@ -170,6 +170,7 @@ static void fade_in(lv_obj_t *page)
 
 void dm_show(dm_page_t p)
 {
+  if (g_dm.page == PAGE_2048 && p != PAGE_2048) dm_health_flush_game();
   int i;
 
   if (p >= PAGE_COUNT)
@@ -220,7 +221,8 @@ void dm_show(dm_page_t p)
           p == PAGE_ALARM_ADD || p == PAGE_MEETING || p == PAGE_MEETING_DETAIL ||
           p == PAGE_VOLUME ||
           p == PAGE_VOICE_SEL ||
-          p == PAGE_ABOUT)
+          p == PAGE_ABOUT || p == PAGE_PERMISSIONS || p == PAGE_AI_LOG ||
+          p == PAGE_PERMISSION_DETAIL)
         {
           lv_obj_add_flag(g_dm_dock, LV_OBJ_FLAG_HIDDEN);
         }
@@ -292,6 +294,7 @@ void dm_tick(void)
   dm_life_tick();
   dm_fun_tick();
   dm_assistant_intent_tick();
+  dm_ai_log_tick();
   dm_chat_tick();
   dm_volume_tick();
   dm_voice_sel_tick();

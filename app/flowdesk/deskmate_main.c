@@ -3,6 +3,8 @@
  ****************************************************************************/
 
 #include "deskmate.h"
+#include "dm_ai_permissions.h"
+#include "dm_ai_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -71,6 +73,8 @@ int flowdesk_main(int argc, FAR char *argv[])
   lv_obj_set_style_pad_all(g_dm_root, 0, LV_PART_MAIN);
   lv_obj_clear_flag(g_dm_root, LV_OBJ_FLAG_SCROLLABLE);
 
+  dm_ai_permissions_init();
+  dm_ai_log_init();
   dm_create_focus_home();
   dm_create_focus_run();
   dm_create_focus_done();
@@ -94,6 +98,8 @@ int flowdesk_main(int argc, FAR char *argv[])
   dm_create_med();
   dm_create_note();
   dm_create_settings();
+  dm_create_permissions();
+  dm_create_ai_log();
   dm_create_wifi();
   dm_wifi_manual_time_restore();
   dm_wifi_auto_start();

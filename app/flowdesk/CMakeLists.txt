@@ -28,6 +28,12 @@ if(CONFIG_DESKMATE_APP)
       dm_chat_ai.c
       dm_ui_mbti.c
       dm_ui_remind.c
+      dm_ai_permissions.c
+      dm_ui_permissions.c
+      dm_ai_log.c
+      dm_ui_ai_log.c
+      dm_ai_local_read.c
+      dm_ai_data.c
       dm_assistant.c
       dm_ui_meeting.c
     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR})

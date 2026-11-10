@@ -7,7 +7,11 @@
 
 #include "deskmate.h"
 #include "dm_pinyin.h"
+#include "dm_ai_local_read.h"
+#include "dm_ai_data.h"
+#include "dm_ai_permissions.h"
 #include <stdio.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -136,7 +140,7 @@ static void note_paint(void)
 
 static int note_save(void)
 {
-  FILE *f = fopen(NOTE_PATH, "w");
+  FILE *f = fopen(NOTE_PATH ".tmp", "w");
   int i;
   int ok = 1;
 
@@ -156,6 +160,8 @@ static int note_save(void)
     {
       ok = 0;
     }
+  if (ok && rename(NOTE_PATH ".tmp", NOTE_PATH) != 0) ok = 0;
+  if (!ok) unlink(NOTE_PATH ".tmp");
   return ok ? 0 : -1;
 }
 
@@ -164,6 +170,7 @@ int dm_note_add_voice(const char *text)
   size_t len;
   size_t i;
   size_t copy_len;
+  int old_selected = s_note_sel;
 
   if (!text || !text[0])
     {
@@ -175,6 +182,7 @@ int dm_note_add_voice(const char *text)
     }
 
   len = strlen(text);
+  if (len >= NOTE_LEN_MAX) return -4;
   copy_len = len < NOTE_LEN_MAX - 1 ? len : NOTE_LEN_MAX - 1;
   if (copy_len < len)
     {
@@ -200,6 +208,7 @@ int dm_note_add_voice(const char *text)
   if (note_save() != 0)
     {
       s_note_n--;
+      s_note_sel = old_selected;
       s_notes[s_note_n][0] = '\0';
       return -3;
     }
@@ -209,6 +218,53 @@ int dm_note_add_voice(const char *text)
       lv_label_set_text(s_tip, dm_t("语音已添加到备忘", "Voice note saved"));
     }
   dm_show(PAGE_NOTE);
+  return 0;
+}
+
+int dm_note_ai_snapshot(dm_ai_local_record_t *out, int cap)
+{
+  int i, n;
+  if (!dm_ai_permission_allowed(DM_AI_READ_LOCAL_DATA)) return -2;
+  if (!out || cap < 1) return -1;
+  n = s_note_n < cap ? s_note_n : cap;
+  for (i = 0; i < n; i++)
+    {
+      memset(&out[i], 0, sizeof(out[i]));
+      snprintf(out[i].title, sizeof(out[i].title), "%s", s_notes[i]);
+    }
+  return n;
+}
+
+int dm_note_ai_delete(const dm_ai_delete_request_t *request)
+{
+  char previous[NOTE_MAX][NOTE_LEN_MAX];
+  int i, found = -1, old_n, old_sel;
+  if (!request || request->kind != DM_AI_DATA_NOTE) return DM_AI_DATA_INVALID;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_NOTE)) return DM_AI_DATA_DENIED;
+  for (i = 0; i < s_note_n; i++)
+    if (dm_ai_data_match(request, s_notes[i], i + 1))
+      {
+        if (found >= 0) return DM_AI_DATA_AMBIGUOUS;
+        found = i;
+      }
+  if (found < 0) return DM_AI_DATA_NOT_FOUND;
+  if (!dm_ai_data_delete_allowed(DM_AI_DATA_NOTE)) return DM_AI_DATA_DENIED;
+  memcpy(previous, s_notes, sizeof(previous));
+  old_n = s_note_n;
+  old_sel = s_note_sel;
+  for (i = found; i + 1 < s_note_n; i++)
+    memcpy(s_notes[i], s_notes[i + 1], NOTE_LEN_MAX);
+  s_note_n--;
+  memset(s_notes[s_note_n], 0, NOTE_LEN_MAX);
+  s_note_sel = s_note_n ? (found < s_note_n ? found : s_note_n - 1) : 0;
+  if (note_save() != 0)
+    {
+      memcpy(s_notes, previous, sizeof(previous));
+      s_note_n = old_n;
+      s_note_sel = old_sel;
+      return DM_AI_DATA_SAVE;
+    }
+  note_paint();
   return 0;
 }
 
@@ -257,7 +313,11 @@ static void note_add_open_cb(lv_event_t *e)
 static void note_del_cb(lv_event_t *e)
 {
   int i;
+  char previous[NOTE_MAX][NOTE_LEN_MAX];
+  int old_count = s_note_n;
+  int old_selected = s_note_sel;
   (void)e;
+  memcpy(previous, s_notes, sizeof(previous));
 
   if (s_note_n <= 0)
     {
@@ -276,7 +336,15 @@ static void note_del_cb(lv_event_t *e)
     {
       s_note_sel = s_note_n > 0 ? s_note_n - 1 : 0;
     }
-  note_save();
+  if (note_save() != 0)
+    {
+      memcpy(s_notes, previous, sizeof(previous));
+      s_note_n = old_count;
+      s_note_sel = old_selected;
+      if (s_tip) lv_label_set_text(s_tip, dm_t("删除未保存，请重试", "Delete failed"));
+      note_paint();
+      return;
+    }
   note_paint();
   if (s_tip)
     {
@@ -308,7 +376,16 @@ static void note_save_draft(lv_event_t *e)
   snprintf(s_notes[s_note_n], NOTE_LEN_MAX, "%s", s_draft);
   s_note_n++;
   s_note_sel = s_note_n - 1;
-  note_save();
+  if (note_save() != 0)
+    {
+      s_note_n--;
+      s_notes[s_note_n][0] = 0;
+      s_note_sel = s_note_n > 0 ? s_note_n - 1 : 0;
+      if (s_tip) lv_label_set_text(s_tip, dm_t("保存失败，请重试", "Save failed"));
+      dm_show(PAGE_NOTE);
+      note_paint();
+      return;
+    }
   note_paint();
   if (s_tip)
     {
